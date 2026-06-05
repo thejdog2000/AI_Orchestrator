@@ -1,0 +1,43 @@
+# Secrets — never commit
+.env
+*.env
+.env.*
+
+# Runtime state — regenerated on each run
+orchestrator.db
+logs/
+pending_review/*.diff
+pending_review/*.json
+dashboard/latest_digest.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node (for lang pipeline smoke tests)
+node_modules/
+
+# Keep these — they're source of truth for task backlogs
+!tasks/*.json
+
+# Keep generated dashboard HTML so you can open it without running the orchestrator
+# (comment out if you don't want it tracked)
+# dashboard/index.html

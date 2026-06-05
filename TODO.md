@@ -1,91 +1,67 @@
-# Orchestrator — Issue Tracker
+# Orchestrator — Remaining TODOs
 
-Issues found during senior AI/solutions engineering review.
-Status: 🔴 open | ✅ fixed | ⏸ deferred
-
----
-
-## BREAKING — Must fix before overnight run
-
-- ✅ **#1 Dead TaskQueue class in main.py shadows import from task_queue.py**
-  Old JSON-based class overwrote `from task_queue import TaskQueue`. Fixed: deleted.
-
-- ✅ **#2 `generate_digest` references `task_queue.completed` — doesn't exist on SQLite class**
-  Fixed: replaced with `task_queue.get_completed_today()`.
-
-- ✅ **#3 `get_next(projects=ENABLED_PROJECTS)` — wrong kwarg on old class**
-  Resolved by #1 fix — old class gone, SQLite class accepts `projects` list.
-
-- ✅ **#4 No process lock — double-execution on crash/restart**
-  Fixed: `_write_pid()` on startup, `_remove_pid()` on shutdown. Exits if PID file exists.
-
-- ✅ **#5 Aider/MiniMax leaves unstaged changes between retries**
-  Fixed: `git checkout -- .` before every task attempt in `_run_task()`.
-
-- ✅ **#6 Relative paths in `get_context_md` — silent failures off expected cwd**
-  Fixed: `REPO_PATHS` dict with absolute `Path.home()` anchored paths for all 6 projects.
+Priority: 🔴 do before first overnight run | 🟡 do before multi-project run | ⚪ polish / low risk
 
 ---
 
-## Concerning — Fix for cost / optimization / risk
+## 🔴 Before First Overnight Run
 
-- ✅ **#7 Token estimation off by 10–100x — spend tracker unreliable**
-  Fixed: `_minimax_execute()` returns actual `usage.prompt_tokens / completion_tokens`
-  from API response. No more word-count guessing.
-
-- ✅ **#8 API key exposed in subprocess args (ps aux visible)**
-  Fixed (via Aider removal): key now only in env var, never passed as CLI arg.
-
-- ✅ **#9 BlockingScheduler + 10-min interval kills overnight throughput**
-  Fixed: `BackgroundScheduler` + 2-min interval + per-project `_project_running` flags.
-  Lang + meridian can now run simultaneously. `max_instances=1, coalesce=True` on job.
-
-- ✅ **#10 Spend caps not split by provider**
-  Fixed: `MINIMAX_SPEND_CAP = 65.0` checked independently. Claude removed — single cap.
-
-- ✅ **#11 Escalation path compounds dirty git state**
-  Fixed: escalation path removed entirely. Fail → log → next task. No Claude dependency.
-
-- ✅ **#12 No `--files` targeting on Aider calls**
-  Fixed (via Aider removal): `run_minimax_task()` loads explicit context, no repo scan.
-
-- ✅ **#13 Log file grows unbounded**
-  Fixed: `RotatingFileHandler(maxBytes=5MB, backupCount=5)`.
-
-- 🔴 **#14 `get_context_md` duplicated in main.py and task_generator.py**
-  Two implementations with different path logic — will drift over time.
-  Fix: consolidate into single `load_context(project)` in `task_queue.py`, import from both.
+**#18 No approval workflow — diffs accumulate in pending_review/ forever**
+Diffs are written but never cleared. Count grows in digest, never goes down.
+Without this, you have no way to act on overnight output from the CLI.
+Build `approve.py`:
+- `python approve.py <task_id>` — applies diff, marks task completed in DB, moves diff to `approved/`
+- `python approve.py --list` — shows all pending with review_priority order
+- `python approve.py --reject <task_id>` — marks failed, deletes diff
 
 ---
 
-## Less Concerning
+## 🟡 Before Multi-Project Run
 
-- ✅ **#15 `SAMPLE_LANG_TASKS` writes a file at module import time**
-  Fixed: refactored into `_seed_sample_tasks()`, called only from `__main__`.
+**#14 `get_context_md` duplicated in main.py and task_generator.py**
+Two implementations with slightly different path logic — will silently drift.
+Consolidate into `load_context(project)` in `task_queue.py`, import from both.
 
-- ✅ **#16 `__import__("time")` inline in task_generator.py**
-  Fixed: `import time` at top of file, inline call removed.
+**CONTEXT.md updater — closes the core feedback loop**
+Currently MiniMax's output never feeds back to improve future prompts.
+After each successful task, Ollama should read `diff + old CONTEXT.md + task description`
+and write an updated CONTEXT.md: what was built, which files changed, known issues.
+Next prompt-writing call reads the updated context → MiniMax gets better instructions.
+Without this, every overnight run starts with a static project snapshot.
+Lives in `executor.py` (after module split). ~40 lines. High value.
 
-- 🔴 **#17 No SQLite DB backup strategy**
-  `orchestrator.db` gitignored (correct). Machine crash = task history lost.
-  Fix: nightly `sqlite3 orchestrator.db .dump > backups/tasks_YYYY-MM-DD.sql`.
+**Smarter retries — prompt revision on failure**
+Current retry: fail → clean git → same prompt again. No learning.
+Better: on quality gate failure, Ollama reads `[task + diff + evaluation.issues]`
+and writes a revised prompt addressing the specific failure before attempt 2.
+One extra Ollama call per failed attempt, meaningfully higher retry success rate.
 
-- 🔴 **#18 No approval workflow — diffs accumulate in pending_review/ forever**
-  Count grows in digest but never goes down. No CLI to approve/reject.
-  Fix: build `approve.py`: `python approve.py <task_id>` applies diff, marks completed.
-
-- 🔴 **#19 Gap-fill task IDs use `int(time.time())` — 1-second resolution**
-  Two calls in the same second → SQLite PRIMARY KEY conflict, silently drops insertion.
-  Fix: `uuid4()` or `time.time_ns()` for gap-fill IDs in `task_queue.py`.
+**#17 No SQLite DB backup**
+`orchestrator.db` gitignored (correct). Machine crash = all task history lost.
+Add nightly job: `sqlite3 orchestrator.db .dump > backups/tasks_YYYY-MM-DD.sql`
+Schedule via APScheduler alongside digests. Keep 7 days of backups.
 
 ---
 
-## Architecture Decisions (locked — don't re-litigate)
+## ⚪ Polish / Low Risk
 
-- **No Aider** — direct MiniMax API calls: full context control, token visibility, no subprocess black box
-- **No Claude escalation** — fail → log → next task. MiniMax + Ollama only.
-- **qwen3-coder:30b** for execution prompts / quality gate; **qwen3:14b** for digest prose
-- **Per-project locks** not global — lang + meridian can run simultaneously
-- **Sequential council** not debate — one MiniMax call per perspective, merge pass separate
-- **MiniMax for task generation** — 30B unreliable on council formats, $0.01/run negligible
-- **Absolute repo paths** — `REPO_PATHS` dict, no cwd dependency
+**Split main.py into modules**
+File is 500+ lines and growing. Large reads burn tokens in every AI session.
+Target split:
+- `orchestrator_main.py` — scheduler, entry point, config (~100 lines)
+- `executor.py` — `run_minimax_task`, `_parse_file_blocks`, `_minimax_execute`, `_run_task`
+- `spend.py` — `SpendTracker`
+- `digests.py` — `generate_digest`, `_write_digest`, digest scheduler functions
+Smaller files = targeted reads, cheaper future sessions.
+
+**#19 Gap-fill task IDs — 1-second resolution collision**
+`int(time.time())` in `task_queue.get_gap_fill_tasks()`.
+Two calls in the same second → SQLite PRIMARY KEY conflict, silently drops insertion.
+Fix: `uuid4()` for gap-fill IDs.
+
+**lang_pipeline.py — dedicated language scene pipeline**
+Scene generation is currently handled by the generic `run_minimax_task` path.
+A dedicated pipeline would: follow the 7-night schedule explicitly, run Node smoke tests
+automatically after each scene, retry failed scenes the next night, track scene-specific
+pass/fail separately from code task history.
+Lower priority since generic path works, but gives better observability for the lang project.

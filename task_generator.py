@@ -29,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 from task_queue import TaskQueue, PERSPECTIVE_PROJECT_MAP
+from executor   import load_context
 
 log = logging.getLogger(__name__)
 
@@ -146,17 +147,10 @@ def _minimax_chat(
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
 def _load_context(project: str) -> str:
-    """Load project CONTEXT.md, truncated to ~600 words to keep prompts lean."""
-    repo_dir  = REPO_PATHS.get(project, project)
-    candidates = [
-        BASE_DIR.parent / repo_dir / "CONTEXT.md",
-        BASE_DIR.parent / project  / "CONTEXT.md",
-    ]
-    for path in candidates:
-        if path.exists():
-            words = path.read_text().split()
-            return " ".join(words[:600]) + (" [truncated]" if len(words) > 600 else "")
-    return f"No CONTEXT.md found for {project}."
+    """Delegate to executor.load_context — single source of truth (fixes #14)."""
+    return load_context(project, {
+        k: BASE_DIR.parent / v for k, v in REPO_PATHS.items()
+    }, max_chars=2400)
 
 
 def _select_perspectives(project: str, sprint_phase: str, max_count: int = 3) -> list:

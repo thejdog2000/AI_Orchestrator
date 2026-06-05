@@ -14,6 +14,7 @@ Schema additions vs original:
 import sqlite3
 import json
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 import logging
@@ -300,10 +301,9 @@ class TaskQueue:
 
     def get_gap_fill_tasks(self) -> list[dict]:
         """Always-available low-stakes tasks when the main queue runs dry."""
-        ts = int(time.time())
         return [
             {
-                "id": f"gap_lang_{ts}",
+                "id": f"gap_lang_{uuid.uuid4().hex[:8]}",
                 "project": "lang",
                 "priority": 2,
                 "description": "Expand randomization pools for any completed language scenes (add 5+ variants to each pool)",
@@ -315,7 +315,7 @@ class TaskQueue:
                 "depends_on": [],
             },
             {
-                "id": f"gap_meridian_{ts}",
+                "id": f"gap_meridian_{uuid.uuid4().hex[:8]}",
                 "project": "meridian",
                 "priority": 2,
                 "description": "Generate JSDoc comments for all undocumented exported functions in meridian-mobile/src",
@@ -327,7 +327,7 @@ class TaskQueue:
                 "depends_on": [],
             },
             {
-                "id": f"gap_rts_{ts}",
+                "id": f"gap_rts_{uuid.uuid4().hex[:8]}",
                 "project": "rts",
                 "priority": 2,
                 "description": "Generate XML summary comments for all public C# methods missing documentation",

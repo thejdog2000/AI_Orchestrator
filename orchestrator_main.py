@@ -1,15 +1,14 @@
 """
-orchestrator/main.py
-Multi-project AI orchestrator — starter scaffold
+orchestrator_main.py
+Multi-project AI orchestrator daemon.
 Feed ORCHESTRATOR_CONTEXT.md to any AI session before iterating on this file.
-Use str_replace for modifications — don't regenerate the whole file.
 
-IMMEDIATE TODOs before first run:
-  1. Set env vars (see bottom of file)
-  2. Set hard spend caps in MiniMax + Anthropic dashboards
-  3. Verify MiniMax M3 promo rate at platform.minimax.io
-  4. Pre-load task JSON files in tasks/ directory
-  5. Run language app pipeline ONLY first — validate before enabling others
+Before first run:
+  1. export MINIMAX_API_KEY="..."
+  2. Set MiniMax spend cap at platform.minimax.io → Billing → $65
+  3. Run `ollama list` — verify qwen3-coder:30b and qwen3:14b are present
+  4. Add task JSON files to tasks/ (or let council generate them)
+  5. Enable lang only first — validate full pipeline before adding other projects
 """
 
 import subprocess
@@ -17,47 +16,92 @@ import json
 import os
 import time
 import logging
+import logging.handlers
+import signal
+import sys
+import re
 from datetime import datetime
 from pathlib import Path
-from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
 import requests
 
 from task_queue import TaskQueue
 from dashboard_generator import generate as generate_dashboard
+from task_generator import generate_tasks_all_projects
 
-# ── CONFIG ──────────────────────────────────────────────────────────────────
+# ── CONFIG ───────────────────────────────────────────────────────────────────
 
-BASE_DIR = Path(__file__).parent
-TASKS_DIR = BASE_DIR / "tasks"
-PENDING_DIR = BASE_DIR / "pending_review"
-LOGS_DIR = BASE_DIR / "logs"
+BASE_DIR      = Path(__file__).parent
+TASKS_DIR     = BASE_DIR / "tasks"
+PENDING_DIR   = BASE_DIR / "pending_review"
+LOGS_DIR      = BASE_DIR / "logs"
 DASHBOARD_DIR = BASE_DIR / "dashboard"
+PID_FILE      = BASE_DIR / "orchestrator.pid"
 
 for d in [TASKS_DIR, PENDING_DIR, LOGS_DIR, DASHBOARD_DIR]:
     d.mkdir(exist_ok=True)
 
 PROJECTS = ["lang", "meridian", "rts", "gamma", "ninja", "tax"]
 
-# Projects enabled for overnight autonomous runs
-# Start with lang only — enable others after validating pipeline
-ENABLED_PROJECTS = ["lang"]  # expand after sprint day 1 validation
+# Start with lang only — validate pipeline before enabling others
+ENABLED_PROJECTS = ["lang"]
 
-MAX_RETRIES = 3
-QUEUE_REFILL_THRESHOLD = 10  # generate new tasks when queue drops below this
+MAX_RETRIES             = 3
+QUEUE_REFILL_THRESHOLD  = 10
+RETRY_BACKOFF_SECONDS   = [5, 15, 30]   # exponential-ish, not flat 5s
 
-MINIMAX_API_BASE = "https://api.minimax.io/v1"
-MINIMAX_MODEL = "minimax/minimax-m3"
+MINIMAX_API_BASE   = "https://api.minimax.io/v1"
+MINIMAX_MODEL      = "minimax-m3"        # direct API model name (not Aider prefix)
+MINIMAX_SPEND_CAP  = 65.0               # hard cap in USD/month
 
-OLLAMA_BASE = "http://localhost:11434"
-OLLAMA_MODEL = "llama3"  # update to your actual 30B model name
+OLLAMA_BASE              = "http://localhost:11434"
+OLLAMA_MODEL_CODE        = "qwen3-coder:30b"   # execution prompts, quality gate
+OLLAMA_MODEL_DIGEST      = "qwen3:14b"         # digest prose — faster, lighter
 
+# Absolute repo paths — no relative path ambiguity regardless of launch directory
+HOME = Path.home()
+REPO_PATHS: dict[str, Path] = {
+    "lang":     HOME / "Documents/claude/projects/language-travel-app",
+    "gamma":    HOME / "Documents/claude/projects/gamma-tool",
+    "meridian": HOME / "projects/meridian-mobile",
+    "rts":      HOME / "projects/ironhold-rts",
+    "ninja":    HOME / "projects/ninjatrader-algos",
+    "tax":      HOME / "projects/tax-cloud-tools",
+}
+
+# ── SPRINT STATE ─────────────────────────────────────────────────────────────
+# Update these as sprints progress. Used by task_generator council calls.
+# Phases: architecture | feature | polish | demo_prep | maintenance
+
+SPRINT_PHASES = {
+    "lang":     "feature",       # overnight scene generation
+    "meridian": "demo_prep",     # 5-screen pitch sprint
+    "rts":      "architecture",  # full C# system generation
+    "gamma":    "maintenance",   # backtest loop
+    "ninja":    "maintenance",   # Saturday param sweep
+    "tax":      "feature",       # builds when client engaged
+}
+
+SPRINT_GOALS = {
+    "lang":     "Generate 2 Japanese A0 scenes (izakaya, konbini) with smoke tests passing",
+    "meridian": "5 screens working end-to-end for men's fashion publication demo",
+    "rts":      "Playable vertical slice: place buildings, train units, basic AI opponent",
+    "gamma":    "Overnight backtest loop running, morning digest showing equity curve",
+    "ninja":    "Saturday parameter sweep pipeline running, Sunday digest with best performers",
+    "tax":      "Azure AVD + PowerShell scripts ready for family tax practice demo",
+}
+
+# ── LOGGING (rotating — no unbounded growth) ─────────────────────────────────
+
+_log_handler = logging.handlers.RotatingFileHandler(
+    LOGS_DIR / "orchestrator.log",
+    maxBytes=5 * 1024 * 1024,   # 5 MB per file
+    backupCount=5,
+)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOGS_DIR / "orchestrator.log"),
-        logging.StreamHandler()
-    ]
+    handlers=[_log_handler, logging.StreamHandler()],
 )
 log = logging.getLogger(__name__)
 
@@ -77,11 +121,9 @@ class SpendTracker:
         self.log_file.write_text(json.dumps(self.data, indent=2))
 
     def record(self, project: str, input_tokens: int, output_tokens: int, model: str):
-        # MiniMax M3 promo rates — update if promo expires
+        # MiniMax M3 promo rates — verify at platform.minimax.io, update when promo expires
         rates = {
-            "minimax/minimax-m3": (0.30, 1.20),   # per 1M tokens input/output
-            "claude-haiku-4-5":   (1.00, 5.00),
-            "claude-sonnet-4-6":  (3.00, 15.00),
+            "minimax-m3": (0.30, 1.20),   # per 1M tokens, promo rate
         }
         input_rate, output_rate = rates.get(model, (0.30, 1.20))
         cost = (input_tokens / 1_000_000 * input_rate) + (output_tokens / 1_000_000 * output_rate)
@@ -102,125 +144,86 @@ class SpendTracker:
         return sum(v["usd"] for k, v in self.data["daily"].items() if k.startswith(month))
 
     def check_caps(self) -> bool:
-        """Returns False if monthly spend approaching hard caps."""
+        """Returns False if monthly MiniMax spend is at or above cap."""
         monthly = self.monthly_spend()
-        if monthly > 90:  # warn at $90, caps are $100
-            log.warning(f"Monthly API spend ${monthly:.2f} approaching cap. Pausing overnight work.")
+        warn_at = MINIMAX_SPEND_CAP * 0.85   # warn at 85% of cap
+        if monthly >= MINIMAX_SPEND_CAP:
+            log.error(f"MiniMax spend ${monthly:.2f} hit ${MINIMAX_SPEND_CAP} cap. Halting.")
             return False
+        if monthly >= warn_at:
+            log.warning(f"MiniMax spend ${monthly:.2f} approaching ${MINIMAX_SPEND_CAP} cap.")
         return True
 
 
 spend_tracker = SpendTracker()
 
-# ── TASK QUEUE ───────────────────────────────────────────────────────────────
+# ── PROCESS LOCK (prevent double-execution on restart) ────────────────────────
 
-class TaskQueue:
-    def __init__(self):
-        self.completed_file = LOGS_DIR / "completed.json"
-        self.completed = self._load_completed()
+def _write_pid():
+    if PID_FILE.exists():
+        existing = PID_FILE.read_text().strip()
+        log.error(
+            f"PID file exists ({existing}). Another instance may be running. "
+            f"If not, delete {PID_FILE} and restart."
+        )
+        sys.exit(1)
+    PID_FILE.write_text(str(os.getpid()))
 
-    def _load_completed(self):
-        if self.completed_file.exists():
-            return json.loads(self.completed_file.read_text())
-        return []
+def _remove_pid():
+    if PID_FILE.exists():
+        PID_FILE.unlink()
 
-    def _save_completed(self):
-        self.completed_file.write_text(json.dumps(self.completed, indent=2))
+# ── PER-PROJECT EXECUTION LOCKS ───────────────────────────────────────────────
+# One flag per project — lang + meridian can run simultaneously (different repos)
+# Two tasks in the same project cannot overlap (would corrupt git state)
 
-    def load_project_tasks(self, project: str) -> list:
-        task_file = TASKS_DIR / f"{project}.json"
-        if not task_file.exists():
-            return []
-        tasks = json.loads(task_file.read_text())
-        completed_ids = {t["id"] for t in self.completed}
-        pending_review_ids = {f.stem for f in PENDING_DIR.glob(f"{project}_*.diff")}
-        return [
-            t for t in tasks
-            if t["id"] not in completed_ids
-            and t["id"] not in pending_review_ids
-            and t.get("status", "queued") == "queued"
-        ]
+_project_running: dict[str, bool] = {p: False for p in PROJECTS}
 
-    def get_next(self, project: str = None) -> dict | None:
-        """Get next unblocked task. Cross-project if project not specified."""
-        projects = [project] if project else ENABLED_PROJECTS
-        for proj in projects:
-            tasks = self.load_project_tasks(proj)
-            unblocked = [
-                t for t in tasks
-                if not t.get("approval_required", False)
-                and self._blocks_satisfied(t)
-            ]
-            if unblocked:
-                # Sort by priority (0=highest)
-                unblocked.sort(key=lambda t: t.get("priority", 1))
-                return unblocked[0]
-        return None
-
-    def _blocks_satisfied(self, task: dict) -> bool:
-        """Check if all tasks this task depends on are completed."""
-        completed_ids = {t["id"] for t in self.completed}
-        depends = task.get("depends_on", [])
-        return all(dep in completed_ids for dep in depends)
-
-    def total_unblocked(self) -> int:
-        count = 0
-        for proj in ENABLED_PROJECTS:
-            tasks = self.load_project_tasks(proj)
-            count += len([t for t in tasks if not t.get("approval_required", False)])
-        return count
-
-    def mark_pending_review(self, task: dict, diff_path: Path):
-        """Task generated diff, awaiting Jacob approval."""
-        task["status"] = "pending_review"
-        task["diff_path"] = str(diff_path)
-        task["completed_at"] = datetime.now().isoformat()
-        log.info(f"[{task['project']}] Task {task['id']} pending review → {diff_path.name}")
-
-    def mark_completed(self, task: dict):
-        task["status"] = "completed"
-        task["completed_at"] = datetime.now().isoformat()
-        self.completed.append(task)
-        self._save_completed()
-
-    def get_gap_fill_tasks(self) -> list:
-        """Always-available low-stakes tasks when queue is empty."""
-        return [
-            {"id": f"gap_{int(time.time())}", "project": "lang", "priority": 2,
-             "description": "Expand randomization pools for any completed language scenes",
-             "approval_required": False, "blocks": []},
-            {"id": f"gap_{int(time.time())+1}", "project": "meridian", "priority": 2,
-             "description": "Generate JSDoc comments for any undocumented exported functions",
-             "approval_required": False, "blocks": []},
-            {"id": f"gap_{int(time.time())+2}", "project": "rts", "priority": 2,
-             "description": "Generate XML summary comments for all public C# methods",
-             "approval_required": False, "blocks": []},
-        ]
-
+# ── TASK QUEUE + STARTUP LOAD ─────────────────────────────────────────────────
 
 task_queue = TaskQueue()  # SQLite-backed — see task_queue.py
 
 # Load any pre-existing JSON task backlogs into the DB on startup
 for _json_file in TASKS_DIR.glob("*.json"):
-    _project = _json_file.stem
     _n = task_queue.load_from_json(_json_file)
     if _n:
         log.info(f"Loaded {_n} new tasks from {_json_file.name}")
 
 # ── OLLAMA CLIENT ─────────────────────────────────────────────────────────────
 
-def ollama_generate(prompt: str, max_tokens: int = 1000) -> str:
-    """Call local Ollama. Returns text. Never makes tool calls."""
+def ollama_generate(
+    prompt: str,
+    max_tokens: int = 1000,
+    json_mode: bool = False,
+    model: str = None,
+) -> str:
+    """
+    Call local Ollama. Used for:
+      - digest prose        → model=qwen3:14b   (faster, lighter)
+      - execution prompts   → model=qwen3-coder:30b (code-aware)
+    NOT used for task generation (MiniMax — see task_generator.py).
+
+    num_ctx always set to 8192 — Ollama defaults to 2048 which silently truncates.
+    """
+    model = model or OLLAMA_MODEL_CODE
     try:
+        payload: dict = {
+            "model":   model,
+            "prompt":  prompt,
+            "stream":  False,
+            "options": {"num_ctx": 8192, "num_predict": max_tokens},
+        }
+        if json_mode:
+            payload["format"] = "json"
         resp = requests.post(
             f"{OLLAMA_BASE}/api/generate",
-            json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
-            timeout=120
+            json=payload,
+            timeout=180,
         )
         resp.raise_for_status()
         return resp.json().get("response", "")
     except Exception as e:
-        log.error(f"Ollama error: {e}")
+        log.error(f"Ollama error ({model}): {e}")
         return ""
 
 
@@ -241,230 +244,297 @@ Write the Aider instruction now:"""
 
 
 def evaluate_diff(diff_text: str, task: dict) -> dict:
-    """Ollama evaluates generated diff quality. Returns score + reasoning."""
-    prompt = f"""Evaluate this code diff for quality and correctness.
-Task was: {task['description']}
-Project: {task['project']}
+    """
+    Ollama evaluates diff quality for low/medium complexity tasks.
+    High complexity tasks skip this and go straight to pending_review for Jacob.
 
-Diff (first 3000 chars):
-{diff_text[:3000]}
+    Uses json_mode=True — without it Ollama intermittently wraps output in markdown
+    fences and the silent fallback (score:5, pass:True) masks the failure.
+    """
+    complexity = task.get("complexity", "medium")
+    if complexity == "high":
+        # Don't trust Ollama on hard diffs — flag for human review regardless
+        log.info(f"[{task['project']}] High-complexity diff — skipping Ollama gate, queuing for review")
+        return {"score": 7, "pass": True, "issues": [], "reasoning": "High complexity — human review required"}
 
-Respond in JSON only:
-{{"score": 0-10, "pass": true/false, "issues": ["issue1"], "reasoning": "brief"}}"""
-    result = ollama_generate(prompt, max_tokens=300)
+    prompt = (
+        f"Evaluate this code diff. Task: {task['description']}\n"
+        f"Project: {task['project']}\n\n"
+        f"Diff (first 2000 chars):\n{diff_text[:2000]}\n\n"
+        f'Return JSON with keys: "score" (0-10), "pass" (true/false), '
+        f'"issues" (array of strings), "reasoning" (string).'
+    )
+    result = ollama_generate(prompt, max_tokens=300, json_mode=True)
     try:
-        # Strip any markdown fences if present
-        clean = result.strip().strip("```json").strip("```").strip()
-        return json.loads(clean)
+        return json.loads(result)
     except Exception:
-        return {"score": 5, "pass": True, "issues": [], "reasoning": "Could not parse evaluation"}
+        log.warning(f"[{task['project']}] Ollama quality gate returned unparseable JSON — defaulting pass")
+        return {"score": 5, "pass": True, "issues": [], "reasoning": "Parse failed"}
 
 
 def generate_digest(period: str) -> str:
-    """Ollama writes human-readable digest from structured log data."""
-    today = datetime.now().strftime("%Y-%m-%d")
-    completed_today = [
-        t for t in task_queue.completed
-        if t.get("completed_at", "").startswith(today)
-    ]
-    pending_count = len(list(PENDING_DIR.glob("*.diff")))
-    monthly_spend = spend_tracker.monthly_spend()
+    """qwen3:14b writes human-readable digest — lighter model, faster for prose."""
+    completed_today = task_queue.get_completed_today()   # fix: was task_queue.completed (missing attr)
+    pending_count   = len(list(PENDING_DIR.glob("*.diff")))
+    monthly_spend   = spend_tracker.monthly_spend()
+    stats           = task_queue.stats()
 
-    prompt = f"""Write a brief {period} digest for Jacob's multi-project AI orchestrator.
-Tone: direct, no fluff. Format: plain text, short bullets.
+    prompt = (
+        f"Write a brief {period} digest for Jacob's multi-project AI orchestrator.\n"
+        f"Tone: direct, no fluff. Plain text, short bullets. 5-8 points max.\n\n"
+        f"DATA:\n"
+        f"- Tasks completed today: {len(completed_today)}\n"
+        f"- Descriptions: {json.dumps([t['description'] for t in completed_today[-10:]])}\n"
+        f"- Diffs awaiting review: {pending_count}\n"
+        f"- Monthly API spend: ${monthly_spend:.2f} / ${MINIMAX_SPEND_CAP:.0f} cap\n"
+        f"- Queue stats: {stats}\n"
+        f"- Enabled projects: {ENABLED_PROJECTS}\n\n"
+        f"Write the {period} digest:"
+    )
+    return ollama_generate(prompt, max_tokens=600, model=OLLAMA_MODEL_DIGEST)
 
-DATA:
-- Tasks completed today: {len(completed_today)}
-- Completed tasks: {json.dumps([t['description'] for t in completed_today[-10:]], indent=2)}
-- Diffs awaiting Jacob review: {pending_count}
-- Monthly API spend so far: ${monthly_spend:.2f} / $100 cap
-- Enabled projects: {ENABLED_PROJECTS}
-
-Write the {period} digest (5-8 bullet points max):"""
-    return ollama_generate(prompt, max_tokens=600)
-
-# ── AIDER RUNNER ─────────────────────────────────────────────────────────────
+# ── EXECUTION ────────────────────────────────────────────────────────────────
 
 def get_context_md(project: str) -> str:
-    """Load project CONTEXT.md. Returns empty string if not found."""
-    # Check common locations
-    candidates = [
-        Path(f"../{project}/CONTEXT.md"),
-        Path(f"../ironhold-rts/CONTEXT.md") if project == "rts" else None,
-        Path(f"../meridian-mobile/CONTEXT.md") if project == "meridian" else None,
-        Path(f"../language-travel-app/CONTEXT.md") if project == "lang" else None,
-    ]
-    for path in candidates:
-        if path and path.exists():
+    """
+    Load project CONTEXT.md using absolute REPO_PATHS — no cwd dependency.
+    Truncated to 3000 chars to keep Ollama prompt manageable.
+    """
+    repo = REPO_PATHS.get(project)
+    if repo:
+        path = repo / "CONTEXT.md"
+        if path.exists():
             return path.read_text()[:3000]
+    log.warning(f"No CONTEXT.md found for {project} at {repo}")
     return f"No CONTEXT.md found for {project}. Proceeding with task description only."
 
 
-def run_aider_task(task: dict, model: str = MINIMAX_MODEL) -> dict:
-    """
-    Run Aider on a task. Returns result dict with success, diff_path, tokens.
-    Uses --no-auto-commits always. Diffs saved to pending_review/.
-    """
-    project = task["project"]
-    
-    # Map project to repo path
-    repo_paths = {
-        "meridian": "../meridian-mobile",
-        "rts": "../ironhold-rts", 
-        "lang": "../language-travel-app",
-        "gamma": "../gamma-tool",
-        "ninja": "../ninjatrader-algos",
-        "tax": "../tax-cloud-tools",
-    }
-    repo_path = Path(repo_paths.get(project, f"../{project}"))
+# MiniMax response file delimiter — unambiguous, avoids markdown code fence edge cases
+_FILE_START = "<<<FILE:"
+_FILE_END   = "<<<END>>>"
 
-    if not repo_path.exists():
-        log.error(f"Repo path not found: {repo_path}")
+
+def _parse_file_blocks(response: str) -> dict:
+    """
+    Parse file blocks from MiniMax response.
+    Expected format:
+      <<<FILE: relative/path/to/file.ext>>>
+      <complete file content>
+      <<<END>>>
+    Returns {relative_path: content}.
+    """
+    pattern = re.compile(r"<<<FILE:\s*(.+?)>>>\s*\n(.*?)<<<END>>>", re.DOTALL)
+    return {m.group(1).strip(): m.group(2) for m in pattern.finditer(response)}
+
+
+def _minimax_execute(system: str, user: str, max_tokens: int = 8000) -> tuple:
+    """
+    Direct MiniMax chat/completions call. Key via env — never in CLI args.
+    Returns (content, input_tokens, output_tokens).
+    """
+    api_key = os.environ.get("MINIMAX_API_KEY", "")
+    if not api_key:
+        raise EnvironmentError("MINIMAX_API_KEY not set")
+
+    resp = requests.post(
+        f"{MINIMAX_API_BASE}/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={
+            "model":       MINIMAX_MODEL,
+            "messages":    [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user},
+            ],
+            "temperature": 0.2,
+            "max_tokens":  max_tokens,
+        },
+        timeout=120,
+    )
+    resp.raise_for_status()
+    data   = resp.json()
+    usage  = data.get("usage", {})
+    return (
+        data["choices"][0]["message"]["content"],
+        usage.get("prompt_tokens", 0),
+        usage.get("completion_tokens", 0),
+    )
+
+
+def run_minimax_task(task: dict) -> dict:
+    """
+    Execute a task via direct MiniMax API.
+    Replaces Aider subprocess — full token visibility, explicit file control.
+
+    Flow:
+      1. Ollama writes focused system prompt from task + CONTEXT.md
+      2. MiniMax generates files in <<<FILE: path>>> delimited blocks
+      3. Python writes files to repo, captures git diff
+      4. Saves diff to pending_review/ for Jacob approval
+      5. Returns actual token counts from API response
+    """
+    project   = task["project"]
+    repo_path = REPO_PATHS.get(project)
+
+    if not repo_path or not repo_path.exists():
+        log.error(f"[{project}] Repo not found: {repo_path}")
         return {"success": False, "error": "repo_not_found"}
 
-    # Get context and write Aider prompt
-    context_md = get_context_md(project)
-    aider_message = write_aider_prompt(task, context_md)
-    
-    if not aider_message:
-        log.error(f"Ollama failed to generate prompt for task {task['id']}")
-        return {"success": False, "error": "prompt_generation_failed"}
+    if not os.environ.get("MINIMAX_API_KEY"):
+        log.error("MINIMAX_API_KEY not set")
+        return {"success": False, "error": "no_api_key"}
 
-    # Build Aider command
-    if "minimax" in model:
-        cmd = [
-            "aider",
-            "--openai-api-base", MINIMAX_API_BASE,
-            "--openai-api-key", os.environ.get("MINIMAX_API_KEY", ""),
-            "--model", model,
-            "--no-auto-commits",
-            "--yes-always",
-            "--message", aider_message,
-        ]
-    else:
-        cmd = [
-            "aider",
-            "--model", model,
-            "--no-auto-commits",
-            "--yes-always",
-            "--message", aider_message,
-        ]
+    context_md    = get_context_md(project)
+    system_prompt = write_aider_prompt(task, context_md)
 
-    log.info(f"[{project}] Running Aider task: {task['id']}")
-    log.info(f"[{project}] Prompt: {aider_message[:200]}...")
+    user_message = (
+        f"Task: {task['description']}\n\n"
+        f"Output every file you create or modify using this exact format — no exceptions:\n"
+        f"<<<FILE: relative/path/to/file.ext>>>\n"
+        f"<complete file content here>\n"
+        f"<<<END>>>\n\n"
+        f"One block per file. Output ALL changed files. No prose or explanation outside the blocks."
+    )
+
+    log.info(f"[{project}] Executing {task['id']} via MiniMax direct API")
 
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=300  # 5 min timeout per task
-        )
-        
-        # Capture git diff of unstaged changes (--no-auto-commits means changes are uncommitted)
-        diff_result = subprocess.run(
-            ["git", "diff"],
-            cwd=repo_path,
-            capture_output=True,
-            text=True
-        )
-        
-        diff_text = diff_result.stdout
-        
-        if not diff_text.strip():
-            log.warning(f"[{project}] Aider produced no diff for task {task['id']}")
-            return {"success": False, "error": "no_diff_produced", "stdout": result.stdout}
-
-        # Save diff to pending_review
-        diff_filename = f"{project}_{task['id']}_{int(time.time())}.diff"
-        diff_path = PENDING_DIR / diff_filename
-        diff_path.write_text(diff_text)
-
-        # Estimate tokens from stdout (Aider reports usage)
-        # TODO: parse actual token counts from Aider output
-        estimated_tokens = len(aider_message.split()) * 1.3 + len(diff_text.split()) * 1.3
-
-        return {
-            "success": True,
-            "diff_path": diff_path,
-            "diff_text": diff_text,
-            "stdout": result.stdout,
-            "estimated_input_tokens": int(estimated_tokens * 0.7),
-            "estimated_output_tokens": int(estimated_tokens * 0.3),
-        }
-
-    except subprocess.TimeoutExpired:
-        log.error(f"[{project}] Aider timed out on task {task['id']}")
-        return {"success": False, "error": "timeout"}
-    except Exception as e:
-        log.error(f"[{project}] Aider error on task {task['id']}: {e}")
+        content, input_tokens, output_tokens = _minimax_execute(system_prompt, user_message)
+    except EnvironmentError as e:
         return {"success": False, "error": str(e)}
+    except requests.HTTPError as e:
+        log.error(f"[{project}] MiniMax HTTP {e.response.status_code}: {e}")
+        return {"success": False, "error": f"api_http_{e.response.status_code}"}
+    except Exception as e:
+        log.error(f"[{project}] MiniMax call failed: {e}")
+        return {"success": False, "error": str(e)}
+
+    file_blocks = _parse_file_blocks(content)
+    if not file_blocks:
+        log.warning(f"[{project}] No file blocks in response for {task['id']}")
+        log.debug(f"Response preview: {content[:400]}")
+        return {"success": False, "error": "no_file_blocks"}
+
+    for rel_path, file_content in file_blocks.items():
+        dest = repo_path / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(file_content)
+        log.info(f"[{project}] Wrote {rel_path}")
+
+    # Stage new files so they appear in git diff
+    subprocess.run(["git", "add", "--intent-to-add", "."],
+                   cwd=repo_path, capture_output=True)
+    diff_result = subprocess.run(
+        ["git", "diff"], cwd=repo_path, capture_output=True, text=True
+    )
+    diff_text = diff_result.stdout
+
+    diff_path = PENDING_DIR / f"{project}_{task['id']}_{int(time.time())}.diff"
+    diff_path.write_text(diff_text or f"# No diff captured\n# Files written: {list(file_blocks)}")
+
+    log.info(f"[{project}] {input_tokens} in / {output_tokens} out tokens")
+
+    return {
+        "success":       True,
+        "diff_path":     diff_path,
+        "diff_text":     diff_text,
+        "files_written": list(file_blocks.keys()),
+        "input_tokens":  input_tokens,
+        "output_tokens": output_tokens,
+    }
 
 # ── MAIN EXECUTION LOOP ───────────────────────────────────────────────────────
 
 def execute_next_task():
-    """Core loop iteration — called by scheduler."""
-    
-    # Check spend caps before running anything
+    """
+    Core loop iteration — called every 2 min by BackgroundScheduler.
+    Tries each enabled project in order, skips any that are already running.
+    Multiple projects can execute simultaneously (different repos, no conflict).
+    """
     if not spend_tracker.check_caps():
-        log.info("Spend cap approaching — skipping task execution this cycle")
+        log.info("Spend cap hit — halting execution")
         return
 
-    # Get next task (cross-project, unblocked, no approval required)
-    task = task_queue.get_next(projects=ENABLED_PROJECTS)
+    # Find a project that has work and isn't currently executing
+    task = None
+    for project in ENABLED_PROJECTS:
+        if _project_running.get(project):
+            continue
+        candidate = task_queue.get_next(projects=[project])
+        if candidate:
+            task = candidate
+            break
+
+    if task is None:
+        # All projects either busy or empty — try gap-fill
+        for project in ENABLED_PROJECTS:
+            if not _project_running.get(project):
+                gap = task_queue.get_gap_fill_tasks()
+                if gap:
+                    task = gap[0]
+                    break
     
     if task is None:
-        # Try gap-fill tasks
-        gap_tasks = task_queue.get_gap_fill_tasks()
-        if gap_tasks:
-            task = gap_tasks[0]
-            log.info(f"Queue empty — running gap-fill: {task['description']}")
-        else:
-            log.info("No tasks available — all projects blocked or queue empty")
-            return
-
-    log.info(f"Executing: [{task['project']}] {task['description']}")
-
-    # Run with retries
-    result = None
-    for attempt in range(MAX_RETRIES):
-        result = run_aider_task(task)
-        if result["success"]:
-            break
-        log.warning(f"Attempt {attempt + 1} failed: {result.get('error')}. Retrying...")
-        time.sleep(5)
-
-    if not result or not result["success"]:
-        log.error(f"Task {task['id']} failed after {MAX_RETRIES} attempts. Flagging for human review.")
-        # Write failure to pending_review for morning digest
-        failure_file = PENDING_DIR / f"FAILED_{task['project']}_{task['id']}.json"
-        failure_file.write_text(json.dumps({"task": task, "result": result}, indent=2))
+        log.info("No tasks available — all projects busy or queue empty")
         return
 
-    # Quality gate
-    evaluation = evaluate_diff(result["diff_text"], task)
+    project = task["project"]
+    _project_running[project] = True
+    log.info(f"[{project}] Starting {task['id']}: {task['description'][:80]}")
+
+    try:
+        _run_task(task)
+    finally:
+        _project_running[project] = False
+
+
+def _run_task(task: dict):
+    """Inner execution — called inside per-project lock."""
+    project   = task["project"]
+
+    # Run with retries — exponential backoff, git clean before each attempt
+    result = None
+    repo_path = REPO_PATHS.get(project)
+    for attempt in range(MAX_RETRIES):
+        # Clean any leftover changes from a prior failed attempt (#5)
+        if repo_path and repo_path.exists():
+            subprocess.run(["git", "checkout", "--", "."], cwd=repo_path,
+                           capture_output=True)
+
+        result = run_minimax_task(task)
+        if result["success"]:
+            break
+        wait = RETRY_BACKOFF_SECONDS[min(attempt, len(RETRY_BACKOFF_SECONDS) - 1)]
+        log.warning(f"[{task['project']}] Attempt {attempt + 1} failed: "
+                    f"{result.get('error')}. Retrying in {wait}s...")
+        time.sleep(wait)
+
+    if not result or not result["success"]:
+        log.error(f"Task {task['id']} failed after {MAX_RETRIES} attempts.")
+        failure_file = PENDING_DIR / f"FAILED_{task['project']}_{task['id']}.json"
+        failure_file.write_text(json.dumps({"task": task, "result": result}, indent=2))
+        task_queue.mark_failed(task, notes=str(result.get("error", "unknown")))
+        return
+
+    # Quality gate (Ollama — skips high-complexity, those go straight to review)
+    evaluation = evaluate_diff(result.get("diff_text", ""), task)
     log.info(f"Quality gate: score={evaluation.get('score')}, pass={evaluation.get('pass')}")
 
     if not evaluation.get("pass", True):
-        # Escalate to Claude Haiku
-        log.info(f"Quality gate failed — escalating {task['id']} to Claude Haiku")
-        result = run_aider_task(task, model="claude-haiku-4-5")
-        
-        if not result["success"]:
-            log.error(f"Claude Haiku also failed — flagging {task['id']} for human review")
-            failure_file = PENDING_DIR / f"ESCALATION_FAILED_{task['project']}_{task['id']}.json"
-            failure_file.write_text(json.dumps({"task": task, "evaluation": evaluation}, indent=2))
-            return
+        # No escalation — log and flag for Jacob. Fail → next task.
+        log.warning(f"[{task['project']}] Quality gate failed for {task['id']} — queuing for review")
+        failure_file = PENDING_DIR / f"QUALITY_FAILED_{task['project']}_{task['id']}.json"
+        failure_file.write_text(json.dumps({"task": task, "evaluation": evaluation}, indent=2))
+        task_queue.mark_failed(task, notes=f"quality gate: {evaluation.get('reasoning','')}")
+        return
 
-    # Record spend
+    # Record actual spend from API response
     cost = spend_tracker.record(
         task["project"],
-        result.get("estimated_input_tokens", 0),
-        result.get("estimated_output_tokens", 0),
-        MINIMAX_MODEL
+        result.get("input_tokens", 0),
+        result.get("output_tokens", 0),
+        MINIMAX_MODEL,
     )
-    log.info(f"Task complete. Estimated cost: ${cost:.4f}. Monthly total: ${spend_tracker.monthly_spend():.2f}")
+    log.info(f"Task complete. Cost: ${cost:.4f}. Monthly: ${spend_tracker.monthly_spend():.2f}")
 
     # Queue diff for Jacob review
     task_queue.mark_pending_review(task, result["diff_path"])
@@ -477,12 +547,19 @@ def execute_next_task():
 
 def generate_new_tasks():
     """
-    Ollama generates next wave of tasks based on completed work.
-    TODO: implement per-project task generation and append to tasks/*.json
+    MiniMax council generates next wave of tasks when queue drops below threshold.
+    Called automatically from the main loop. See task_generator.py for full design.
     """
-    # TODO: for each enabled project, read CONTEXT.md + completed log,
-    # ask Ollama to generate 20 more tasks, validate JSON, append to tasks/{project}.json
-    log.info("Task generation not yet implemented — add tasks manually to tasks/*.json")
+    inserted = generate_tasks_all_projects(
+        task_queue       = task_queue,
+        enabled_projects = ENABLED_PROJECTS,
+        sprint_phases    = SPRINT_PHASES,
+        sprint_goals     = SPRINT_GOALS,
+        threshold        = QUEUE_REFILL_THRESHOLD,
+    )
+    if inserted:
+        log.info(f"Council generated {inserted} new tasks across enabled projects")
+        generate_dashboard()  # refresh dashboard after new tasks land
 
 
 # ── DIGEST SCHEDULER ─────────────────────────────────────────────────────────
@@ -518,42 +595,51 @@ def evening_digest():
 
 # ── SCHEDULER SETUP ───────────────────────────────────────────────────────────
 
-scheduler = BlockingScheduler()
+scheduler = BackgroundScheduler()
 
-# Main execution loop — every 10 minutes
-# Adjust frequency based on task complexity and token budget
-scheduler.add_job(execute_next_task, 'interval', minutes=10, id='main_loop')
+# Main loop: 2-min interval (was 10 min with BlockingScheduler — 5x throughput gain)
+# Per-project locks prevent overlapping tasks within the same repo
+scheduler.add_job(execute_next_task, "interval", minutes=2,
+                  id="main_loop", max_instances=1, coalesce=True)
 
 # Digest schedule
-scheduler.add_job(morning_digest,   'cron', hour=8,  minute=0, id='morning_digest')
-scheduler.add_job(afternoon_digest, 'cron', hour=14, minute=0, id='afternoon_digest')
-scheduler.add_job(evening_digest,   'cron', hour=20, minute=0, id='evening_digest')
+scheduler.add_job(morning_digest,   "cron", hour=8,  minute=0, id="morning_digest")
+scheduler.add_job(afternoon_digest, "cron", hour=14, minute=0, id="afternoon_digest")
+scheduler.add_job(evening_digest,   "cron", hour=20, minute=0, id="evening_digest")
 
 
 # ── ENTRY POINT ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    log.info("="*60)
+    _write_pid()    # crash-safe: exits if another instance is running
+
+    log.info("=" * 60)
     log.info("Orchestrator starting")
     log.info(f"Enabled projects: {ENABLED_PROJECTS}")
     log.info(f"Monthly spend so far: ${spend_tracker.monthly_spend():.2f}")
-    log.info("="*60)
+    log.info("=" * 60)
 
-    # Safety check
+    # Seed starter tasks if queue is empty
+    if task_queue.total_unblocked(projects=ENABLED_PROJECTS) == 0:
+        _seed_sample_tasks()
+
     unblocked = task_queue.total_unblocked(projects=ENABLED_PROJECTS)
     log.info(f"Unblocked tasks ready: {unblocked}")
     log.info(f"DB stats: {task_queue.stats()}")
-    if unblocked == 0:
-        log.warning("No tasks loaded. Add tasks to tasks/*.json before running.")
-        log.warning("Example task structure in ORCHESTRATOR_CONTEXT.md")
+
     generate_dashboard()
     log.info(f"Dashboard → {DASHBOARD_DIR / 'index.html'}")
 
     try:
         scheduler.start()
-    except KeyboardInterrupt:
-        log.info("Orchestrator stopped by user")
-        scheduler.shutdown()
+        # Keep main thread alive for BackgroundScheduler
+        while True:
+            time.sleep(60)
+    except (KeyboardInterrupt, SystemExit):
+        log.info("Orchestrator stopping...")
+        scheduler.shutdown(wait=False)
+        _remove_pid()
+        log.info("Orchestrator stopped.")
 
 
 # ── ENV VARS REQUIRED ─────────────────────────────────────────────────────────
@@ -605,46 +691,37 @@ Scene schema in ORCHESTRATOR_CONTEXT.md → "Scene JS module schema"
 """
 
 
-# ── SAMPLE TASK JSON (save to tasks/lang.json to start) ──────────────────────
-SAMPLE_LANG_TASKS = """
-[
-  {
-    "id": "lang_001",
-    "project": "lang",
-    "description": "Generate complete scene JS module for Japanese A0 izakaya scenario following the scene schema. Include dialogue tree, randomization pools (5+ variants each), Three.js config, and SRS card list. Save to scenes/ja/izakaya_01.js",
-    "approval_required": false,
-    "depends_on": [],
-    "blocks": ["lang_002"],
-    "estimated_tokens": 8000,
-    "priority": 0,
-    "status": "queued"
-  },
-  {
-    "id": "lang_002",
-    "project": "lang",
-    "description": "Generate complete scene JS module for Japanese A0 convenience store (konbini) scenario. Save to scenes/ja/konbini_01.js",
-    "approval_required": false,
-    "depends_on": [],
-    "blocks": [],
-    "estimated_tokens": 8000,
-    "priority": 0,
-    "status": "queued"
-  },
-  {
-    "id": "lang_003",
-    "project": "lang",
-    "description": "Generate Node.js smoke test runner that validates: scene exports correctly, all required schema fields present, randomizationPool has 5+ items per key, Three.js config has valid structure. Save to tests/smoke.js",
-    "approval_required": false,
-    "depends_on": [],
-    "blocks": [],
-    "estimated_tokens": 5000,
-    "priority": 0,
-    "status": "queued"
-  }
-]
-"""
-
-# Save sample tasks on first run if file doesn't exist
-if not (TASKS_DIR / "lang.json").exists():
-    (TASKS_DIR / "lang.json").write_text(SAMPLE_LANG_TASKS)
-    log.info("Created sample lang.json task file")
+def _seed_sample_tasks():
+    """Seed lang.json with starter tasks if no tasks exist yet. Call only from __main__."""
+    sample = [
+        {
+            "id": "lang_001", "project": "lang", "priority": 0, "status": "queued",
+            "complexity": "medium", "effort_category": "feature",
+            "perspective": "speech_linguist", "approval_required": False,
+            "depends_on": [], "blocks": [],
+            "description": "Generate complete scene JS module for Japanese A0 izakaya scenario. Include dialogue tree, randomization pools (5+ variants each), Three.js config, SRS card list. Save to scenes/ja/izakaya_01.js",
+            "rationale": "First scene validates the full generation pipeline",
+            "estimated_tokens": 8000,
+        },
+        {
+            "id": "lang_002", "project": "lang", "priority": 0, "status": "queued",
+            "complexity": "medium", "effort_category": "feature",
+            "perspective": "speech_linguist", "approval_required": False,
+            "depends_on": [], "blocks": [],
+            "description": "Generate complete scene JS module for Japanese A0 konbini (convenience store) scenario. Save to scenes/ja/konbini_01.js",
+            "rationale": "Second night-1 scene",
+            "estimated_tokens": 8000,
+        },
+        {
+            "id": "lang_003", "project": "lang", "priority": 0, "status": "queued",
+            "complexity": "low", "effort_category": "test",
+            "perspective": "qa_tester", "approval_required": False,
+            "depends_on": [], "blocks": [],
+            "description": "Generate Node.js smoke test runner: validates scene exports correctly, required schema fields present, randomizationPool has 5+ items per key, Three.js config valid. Save to tests/smoke.js",
+            "rationale": "Automated pass/fail gate for every generated scene",
+            "estimated_tokens": 5000,
+        },
+    ]
+    inserted = sum(1 for t in sample if task_queue.add_task(t))
+    if inserted:
+        log.info(f"Seeded {inserted} starter lang tasks into queue")

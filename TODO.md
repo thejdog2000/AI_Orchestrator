@@ -73,6 +73,95 @@ Fix: hash description before insert, skip if hash exists.
 
 ---
 
+## 🟡 Medium — Planned Features
+
+**FEAT-1 Persona files for every council member and reader persona**
+Currently council perspectives are bare role strings ("speech_linguist", "game_designer").
+Fleshing out full definitions dramatically improves task quality — specificity beats vagueness.
+
+Build `personas/` directory with two subdirectories:
+
+`personas/domain/` — used in task generation council (task_generator.py)
+  Each file: identity + background, primary concern, what they look for (project-specific),
+  what they explicitly don't care about, questions they always ask, which projects/phases to invoke.
+  Files to build:
+  - speech_linguist.md        (lang: Japanese/Spanish A0-A1 dialogue naturalness)
+  - pedagogy_expert.md        (lang: SRS design, vocabulary sequencing, learner psychology)
+  - game_designer.md          (rts: Stronghold/AoE inspiration, feel loops, player agency)
+  - game_feel_engineer.md     (rts: juice, feedback, moment-to-moment satisfaction)
+  - engineering_architect.md  (all: system design, scalability, tech debt tradeoffs)
+  - security_engineer.md      (meridian, tax: trust boundaries, auth, data exposure)
+  - qa_tester.md              (all: edge cases, failure modes, regression risk)
+  - product_manager.md        (meridian, lang, tax: user value, scope, pitch-readiness)
+  - mobile_ux_designer.md     (meridian: React Native/Expo patterns, gesture UX)
+  - systems_architect.md      (rts, gamma, ninja: concurrency, state machines, performance)
+  - quant_analyst.md          (gamma, ninja: signal quality, drawdown, statistical validity)
+  - risk_manager.md           (gamma, ninja: PDT rules, position sizing, tail risk)
+  - devops.md                 (meridian, tax: CI/CD, EAS build, Azure deployment)
+  - it_administrator.md       (tax: Entra ID, Intune, AVD, QuickBooks/TaxDome integration)
+  - client_success.md         (tax: deliverable clarity, client communication, handoff docs)
+
+`personas/review/` — used for documentation, architecture decisions, PR review
+  Each file: who this reader is, what they need to get from the doc, what makes them bounce,
+  what question they come with, what they'll do next if the doc answers it.
+  Files to build:
+  - newcomer.md               (non-technical, first contact — needs value before mechanism)
+  - skeptic.md                (technical evaluator — needs proof, not claims)
+  - first_time_runner.md      (already convinced, wants to try it NOW — needs steps not vision)
+  - contributor.md            (wants to extend or fix something — needs structure navigation)
+
+AI engineering best practices for each file:
+  - Keep under 300 words — anything longer gets truncated or ignored by the model
+  - "What you don't care about" section is as important as "what you look for"
+  - Include 3-5 specific questions the persona always asks — forces concrete output
+  - Add a "when to invoke" line so task_generator.py can load selectively
+  - Write in second person ("You are...") for direct prompt injection
+
+Wire up: update task_generator.py to load persona file content into each
+perspective call instead of relying on the bare role name string.
+
+---
+
+**FEAT-2 Proactive approval notifications — push alerts when blocked**
+Currently: Jacob has to remember to check approve.py / digest / logs.
+Should be: orchestrator pushes a concise alert the moment it needs Jacob.
+
+This is a pull → push shift. The system knows when it's blocked. Jacob shouldn't have to poll.
+
+**Trigger conditions (each sends a notification):**
+1. `approval_required=True` task reaches queue front — literally cannot proceed without Jacob
+2. Pending review count crosses threshold (configurable, default 5) — don't let diffs pile up
+3. Same task fails quality gate 2+ times — may need human judgment to unblock
+4. Spend reaches 85% of cap — Jacob should know before it halts
+5. MiniMax API errors on 3+ consecutive tasks — likely key issue or outage
+6. Morning digest generated (daily summary push — optional, low priority)
+
+**Notification content — concise, actionable:**
+  - What is blocked (task ID, project, one-line description)
+  - Why it's blocked (approval_required / quality_failed / spend_warning)
+  - Exact command to run: `python approve.py <task_id>`
+  - Current spend: $X.XX / $65 cap
+  - How long it's been waiting
+
+**Channels to implement (in priority order):**
+1. Email via SMTP — most universal, good for digest-length summaries
+   Config: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, NOTIFY_EMAIL in config.py
+2. SMS via Twilio — most immediate, ideal for approval_required blocks
+   Config: TWILIO_SID, TWILIO_TOKEN, TWILIO_FROM, NOTIFY_PHONE in config.py
+3. ntfy.sh push — free, no account needed, good for mobile
+   Config: NTFY_TOPIC in config.py (e.g. "jacobs-orchestrator-abc123")
+4. macOS notification via osascript — local/daytime only, zero setup
+   Fallback when no external channel configured
+
+**Implementation:**
+  - New `notify.py` module — `send(subject, body, channel="all")` interface
+  - Called from executor.py (task blocked), orchestrator_main.py (spend warning, startup)
+  - Never blocks task execution — fire-and-forget with timeout
+  - Rate limiting: max 1 notification per trigger type per hour (no spam)
+  - All channels optional — graceful no-op if not configured
+
+---
+
 ## ⚪ Low — Polish
 
 **LOW-1 `git_watcher.py` doesn't verify stale PID is alive**

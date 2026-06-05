@@ -361,42 +361,60 @@ export const scene = {
 
 ## Jacob's Daily Rhythm (Validator Role)
 
+The orchestrator pushes notifications proactively — Jacob should not need to poll.
+See FEAT-2 in TODO.md for notification implementation status.
+
+**Triggered (any time, no schedule):**
+- Push notification when `approval_required=True` task is blocked at queue front
+- Push notification when pending review count > 5 diffs
+- Push notification when spend reaches 85% of $65 cap
+- Morning digest pushed at 8am automatically
+
 **Morning (~20 min):**
-- Read overnight digest
-- Review + approve/reject pending diff batch
+- Read pushed morning digest (or check `dashboard/latest_digest.txt`)
+- Run `python approve.py` — review pending diffs by review_priority order
+- Approve or reject each diff (`approve.py <task_id>` / `--reject <task_id>`)
+- Commit approved batches: `git -C <repo_path> commit -m "feat: ..."`
 - Check API spend vs daily budget
-- Set daytime priority
 
 **Afternoon (~15 min):**
-- Mid-day digest check
-- Unblock any stalled tasks needing human input
-- Adjust overnight queue priorities
+- Check for any pushed approval-blocked notifications
+- Unblock stalled `approval_required` tasks
+- Adjust `SPRINT_PHASES` / `SPRINT_GOALS` in `config.py` if sprint state changed
 
 **Evening (~10 min):**
-- Review afternoon output
-- Approve remaining diffs
-- Confirm overnight queue loaded + caps set
+- Confirm overnight queue has unblocked tasks (`python approve.py` shows count)
+- Approve any remaining diffs from the day
+- Verify spend cap has headroom for overnight run
 
 ---
 
-## Aider Configuration
+## Execution Model (no Aider)
 
+Aider has been removed. All code generation uses direct MiniMax API calls via `executor.py`.
+
+```python
+# executor._minimax_chat() — direct API, full token visibility
+POST https://api.minimax.io/v1/chat/completions
+{
+  "model": "minimax-m3",       # verify at platform.minimax.io
+  "messages": [system, user],
+  "temperature": 0.2,          # deterministic code output
+  "max_tokens": 8000
+}
+
+# Response parsed for <<<FILE: path>>> ... <<<END>>> blocks
+# Each path validated against repo root before writing (path traversal guard)
+# Actual token counts read from usage.prompt_tokens / completion_tokens
+```
+
+Key env vars required:
 ```bash
-# Primary: MiniMax M3 via OpenAI-compatible endpoint
-aider \
-  --openai-api-base https://api.minimax.io/v1 \
-  --openai-api-key $MINIMAX_API_KEY \
-  --model minimax/minimax-m3 \
-  --no-auto-commits \          # diffs queue for approval, never auto-merge
-  --yes-always \               # don't prompt for confirmations in subprocess mode
-  --message "$TASK_PROMPT"
-
-# Escalation: Claude Haiku
-aider \
-  --model claude-haiku-4-5 \
-  --no-auto-commits \
-  --yes-always \
-  --message "$TASK_PROMPT"
+export MINIMAX_API_KEY="your_key"
+# Optional notification channels (see FEAT-2 in TODO.md):
+export SMTP_USER="..."    export SMTP_PASS="..."    export NOTIFY_EMAIL="..."
+export TWILIO_SID="..."   export TWILIO_TOKEN="..."  export NOTIFY_PHONE="..."
+export NTFY_TOPIC="jacobs-orchestrator-abc123"
 ```
 
 ---
@@ -406,18 +424,31 @@ aider \
 ```
 ~/projects/
   Orchestrator/               # git repo: github.com/thejdog2000/AI_Orchestrator
-    orchestrator_main.py      # APScheduler daemon, spend tracker, Aider runner
+    config.py                 # ← EDIT THIS. Single source of truth: paths, models, caps
+    orchestrator_main.py      # Entry point: scheduler, process lock, startup health checks
+    executor.py               # MiniMax execution, Ollama prompts, CONTEXT.md feedback loop
+    spend.py                  # SpendTracker with atomic writes
+    digests.py                # Morning/afternoon/evening digest generation
     task_queue.py             # SQLite-backed queue (orchestrator.db)
                               #   fields: complexity, rationale, effort_category,
                               #           perspective, review_priority (1-5)
     task_generator.py         # Council task generation via MiniMax direct API
-                              #   sequential perspective calls + JSON merge pass
+    lang_pipeline.py          # Dedicated language scene pipeline (7-night schedule)
     dashboard_generator.py    # Generates dashboard/index.html (static Kanban)
-    lang_pipeline.py          # TODO: nightly language scene generation (separate from Aider)
+    approve.py                # CLI: list / approve (git add) / reject / --open
+    git_watcher.py            # Auto-commit daemon — run separately: python git_watcher.py &
+    notify.py                 # TODO (FEAT-2): push notifications for blocked approvals
+    personas/
+      domain/                 # TODO (FEAT-1): domain expert persona definitions
+      review/                 # TODO (FEAT-1): reader persona definitions
     ORCHESTRATOR_CONTEXT.md   # This file — feed to any AI session to restore context
+    README.md                 # Non-technical overview with Mermaid diagram
+    TODO.md                   # Remaining work, prioritised
+    COMPLETED.md              # Full history of bugs fixed and features built
     .gitignore                # excludes: .env, orchestrator.db, logs/, pending_review/
     tasks/
       lang.json               # pre-loaded task backlogs (seeded, then SQLite takes over)
+      lang_schedule.json      # 7-night language scene schedule state
       meridian.json
       rts.json
       gamma.json
@@ -484,6 +515,48 @@ Last updated: [date] by orchestrator
 Target: medium scenario. Ollama handles routing/digest/orchestration (free). MiniMax handles bulk coding. Claude API handles escalations only.
 
 ---
+
+## Persona Files
+
+Council perspectives live as structured markdown in `personas/`:
+
+```
+personas/
+  domain/          # injected into task_generator.py council calls
+    speech_linguist.md, pedagogy_expert.md, game_designer.md,
+    game_feel_engineer.md, engineering_architect.md, security_engineer.md,
+    qa_tester.md, product_manager.md, mobile_ux_designer.md,
+    systems_architect.md, quant_analyst.md, risk_manager.md,
+    devops.md, it_administrator.md, client_success.md
+  review/          # injected into documentation and architecture review prompts
+    newcomer.md, skeptic.md, first_time_runner.md, contributor.md
+```
+
+Each file follows this structure (keep under 300 words):
+- **Identity** — who this person is, their background
+- **Primary concern** — one optimization target
+- **What they look for** — project-specific, concrete
+- **What they don't care about** — scopes the review, prevents bloat
+- **Questions they always ask** — 3–5 specific questions
+- **When to invoke** — which projects + phases
+
+Status: defined in PERSPECTIVE_PROJECT_MAP (task_queue.py) as strings.
+Full persona files not yet built — see FEAT-1 in TODO.md.
+
+## Proactive Notifications
+
+The orchestrator pushes alerts rather than waiting for Jacob to poll.
+Implemented in `notify.py` (see FEAT-2 in TODO.md for status).
+
+Trigger → Channel mapping:
+- `approval_required` task blocked → SMS (Twilio) — most time-sensitive
+- Pending review > 5 diffs → push (ntfy.sh) — accumulation alert
+- Spend ≥ 85% cap → email + push — spend warning
+- API errors × 3 consecutive → email — possible key/outage issue
+- Morning digest → email — daily summary
+
+Rate limit: max 1 notification per trigger type per hour.
+All channels optional — graceful no-op if env vars not set.
 
 ## Council Prompting Design
 

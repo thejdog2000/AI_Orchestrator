@@ -38,6 +38,10 @@ node_modules/
 # Keep these — they're source of truth for task backlogs
 !tasks/*.json
 
+# git_watcher IPC — written by Claude, consumed by git_watcher.py on your Mac
+COMMIT_REQUEST.txt
+.git_watcher.pid
+
 # Keep generated dashboard HTML so you can open it without running the orchestrator
 # (comment out if you don't want it tracked)
 # dashboard/index.html

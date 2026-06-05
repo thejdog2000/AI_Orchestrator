@@ -379,6 +379,24 @@ def run_task(task: dict, spend_tracker, task_queue):
         generate_dashboard()
 
 
+# ── GIT COMMIT IPC ───────────────────────────────────────────────────────────
+
+def request_commit(message: str):
+    """
+    Write COMMIT_REQUEST.txt so git_watcher.py (running on your Mac) can
+    git add -A + commit + push without sandbox permission restrictions.
+
+    Usage: request_commit("feat: add izakaya scene")
+    git_watcher.py polls every 10s, handles it, deletes the request file.
+    """
+    base = _cfg("BASE_DIR")
+    req  = base / "COMMIT_REQUEST.txt"
+    if req.exists():
+        log.warning("COMMIT_REQUEST.txt already exists — watcher may be behind")
+    req.write_text(message)
+    log.info(f"Commit requested: {message[:60]}")
+
+
 # ── SHARED UTILITY ────────────────────────────────────────────────────────────
 
 def load_context(project: str, repo_paths: dict, max_chars: int = 3000) -> str:

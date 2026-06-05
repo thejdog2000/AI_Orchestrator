@@ -30,16 +30,12 @@ import requests
 
 log = logging.getLogger(__name__)
 
-HOME      = Path.home()
-REPO_PATH = HOME / "Documents/claude/projects/language-travel-app"
-BASE_DIR  = Path(__file__).parent
-STATE_FILE = BASE_DIR / "tasks" / "lang_schedule.json"
+from config import (MINIMAX_API_BASE, MINIMAX_MODEL, OLLAMA_BASE,
+                    OLLAMA_MODEL_CODE, REPO_PATHS, TASKS_DIR)
 
-MINIMAX_API_BASE = "https://api.minimax.io/v1"
-MINIMAX_MODEL    = "minimax-m3"
-
-OLLAMA_BASE       = "http://localhost:11434"
-OLLAMA_MODEL_CODE = "qwen3-coder:30b"
+BASE_DIR   = Path(__file__).parent
+REPO_PATH  = REPO_PATHS["lang"]
+STATE_FILE = TASKS_DIR / "lang_schedule.json"
 
 # ── 7-NIGHT SCHEDULE ─────────────────────────────────────────────────────────
 # Each scene: {id, language, level, location, status: pending|pass|fail, night}
@@ -259,10 +255,14 @@ def _generate_scene(scene: dict) -> dict:
             import re
             blocks = re.findall(r"<<<FILE:\s*(.+?)>>>\s*\n(.*?)<<<END>>>", content, re.DOTALL)
             for rel_path, file_content in blocks:
-                dest = REPO_PATH / rel_path.strip()
+                rel = rel_path.strip()
+                dest = (REPO_PATH / rel).resolve()
+                if not dest.is_relative_to(REPO_PATH.resolve()):
+                    log.error(f"[lang] BLOCKED path traversal: {rel}")
+                    continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_text(file_content)
-                log.info(f"[lang] Wrote {rel_path.strip()}")
+                log.info(f"[lang] Wrote {rel}")
             return {"success": True, "smoke_passed": True,
                     "input_tokens": in_tok, "output_tokens": out_tok}
         except Exception as e:

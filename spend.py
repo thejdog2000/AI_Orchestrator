@@ -4,6 +4,7 @@ MiniMax API spend tracking and cap enforcement.
 """
 
 import json
+import os
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -32,7 +33,11 @@ class SpendTracker:
         return {"daily": {}, "total_input_tokens": 0, "total_output_tokens": 0, "total_usd": 0.0}
 
     def _save(self):
-        self.log_file.write_text(json.dumps(self.data, indent=2))
+        # Atomic write — prevents corrupted spend file on crash mid-write.
+        # Corrupted spend file = no cap enforcement = uncapped overnight spend.
+        tmp = self.log_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.data, indent=2))
+        os.replace(tmp, self.log_file)
 
     def record(self, project: str, input_tokens: int, output_tokens: int, model: str) -> float:
         input_rate, output_rate = MINIMAX_RATES.get(model, DEFAULT_RATE)

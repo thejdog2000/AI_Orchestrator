@@ -27,21 +27,12 @@ import sys
 from pathlib import Path
 
 # Resolve project root relative to this script
-BASE_DIR     = Path(__file__).parent
-PENDING_DIR  = BASE_DIR / "pending_review"
-APPROVED_DIR = BASE_DIR / "approved"
-APPROVED_DIR.mkdir(exist_ok=True)
+from config import BASE_DIR, PENDING_DIR, APPROVED_DIR, REPO_PATHS
 
-from pathlib import Path as _Path
-_HOME = _Path.home()
-REPO_PATHS = {
-    "lang":     _HOME / "Documents/claude/projects/language-travel-app",
-    "gamma":    _HOME / "Documents/claude/projects/gamma-tool",
-    "meridian": _HOME / "projects/meridian-mobile",
-    "rts":      _HOME / "projects/ironhold-rts",
-    "ninja":    _HOME / "projects/ninjatrader-algos",
-    "tax":      _HOME / "projects/tax-cloud-tools",
-}
+# Ensure dirs exist regardless of whether orchestrator_main has run
+APPROVED_DIR.mkdir(exist_ok=True)
+(BASE_DIR / "pending_review").mkdir(exist_ok=True)
+
 
 from task_queue import TaskQueue
 task_queue = TaskQueue()

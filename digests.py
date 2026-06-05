@@ -12,13 +12,16 @@ from executor import ollama_generate
 
 log = logging.getLogger(__name__)
 
+from config import CFG as _DEFAULT_CFG
+
 _config: dict = {}
 
 def configure(cfg: dict):
     _config.update(cfg)
 
 def _cfg(key: str):
-    return _config[key]
+    # Fall back to config.py defaults if configure() hasn't been called
+    return _config.get(key) or _DEFAULT_CFG[key]
 
 
 def generate_digest(period: str, task_queue, spend_tracker) -> str:

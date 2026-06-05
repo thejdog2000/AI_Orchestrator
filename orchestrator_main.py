@@ -27,91 +27,14 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 import executor
 import digests
+from config      import (CFG, BASE_DIR, TASKS_DIR, PENDING_DIR, APPROVED_DIR,
+                          LOGS_DIR, BACKUPS_DIR, DASHBOARD_DIR, PID_FILE, DB_PATH,
+                          PROJECTS, ENABLED_PROJECTS, MINIMAX_SPEND_CAP, REPO_PATHS)
 from spend       import SpendTracker
 from task_queue  import TaskQueue
 from dashboard_generator import generate as generate_dashboard
 from task_generator      import generate_tasks_all_projects
 from lang_pipeline       import run_nightly as run_lang_nightly
-
-# ── CONFIG ────────────────────────────────────────────────────────────────────
-
-BASE_DIR      = Path(__file__).parent
-TASKS_DIR     = BASE_DIR / "tasks"
-PENDING_DIR   = BASE_DIR / "pending_review"
-APPROVED_DIR  = BASE_DIR / "approved"
-LOGS_DIR      = BASE_DIR / "logs"
-BACKUPS_DIR   = BASE_DIR / "backups"
-DASHBOARD_DIR = BASE_DIR / "dashboard"
-PID_FILE      = BASE_DIR / "orchestrator.pid"
-DB_PATH       = BASE_DIR / "orchestrator.db"
-
-for d in [TASKS_DIR, PENDING_DIR, APPROVED_DIR, LOGS_DIR, BACKUPS_DIR, DASHBOARD_DIR]:
-    d.mkdir(exist_ok=True)
-
-PROJECTS         = ["lang", "meridian", "rts", "gamma", "ninja", "tax"]
-ENABLED_PROJECTS = ["lang"]   # expand after validating pipeline per project
-
-MAX_RETRIES            = 3
-QUEUE_REFILL_THRESHOLD = 10
-RETRY_BACKOFF_SECONDS  = [5, 15, 30]
-
-MINIMAX_API_BASE  = "https://api.minimax.io/v1"
-MINIMAX_MODEL     = "minimax-m3"
-MINIMAX_SPEND_CAP = 65.0
-
-OLLAMA_BASE        = "http://localhost:11434"
-OLLAMA_MODEL_CODE  = "qwen3-coder:30b"
-OLLAMA_MODEL_DIGEST = "qwen3:14b"
-
-HOME = Path.home()
-REPO_PATHS: dict[str, Path] = {
-    "lang":     HOME / "Documents/claude/projects/language-travel-app",
-    "gamma":    HOME / "Documents/claude/projects/gamma-tool",
-    "meridian": HOME / "projects/meridian-mobile",
-    "rts":      HOME / "projects/ironhold-rts",
-    "ninja":    HOME / "projects/ninjatrader-algos",
-    "tax":      HOME / "projects/tax-cloud-tools",
-}
-
-SPRINT_PHASES = {
-    "lang":     "feature",
-    "meridian": "demo_prep",
-    "rts":      "architecture",
-    "gamma":    "maintenance",
-    "ninja":    "maintenance",
-    "tax":      "feature",
-}
-
-SPRINT_GOALS = {
-    "lang":     "Generate Japanese A0 scenes (izakaya, konbini) with smoke tests passing",
-    "meridian": "5 screens end-to-end for men's fashion publication demo",
-    "rts":      "Playable vertical slice: buildings, units, basic AI, FPS possession",
-    "gamma":    "Overnight backtest loop running, morning digest showing equity curve",
-    "ninja":    "Saturday parameter sweep pipeline, Sunday digest with best performers",
-    "tax":      "Azure AVD + PowerShell scripts ready for tax practice demo",
-}
-
-# Shared config dict passed to all modules
-CFG = {
-    "BASE_DIR":              BASE_DIR,
-    "PENDING_DIR":           PENDING_DIR,
-    "APPROVED_DIR":          APPROVED_DIR,
-    "DASHBOARD_DIR":         DASHBOARD_DIR,
-    "DB_PATH":               DB_PATH,
-    "ENABLED_PROJECTS":      ENABLED_PROJECTS,
-    "REPO_PATHS":            REPO_PATHS,
-    "SPRINT_PHASES":         SPRINT_PHASES,
-    "SPRINT_GOALS":          SPRINT_GOALS,
-    "MAX_RETRIES":           MAX_RETRIES,
-    "QUEUE_REFILL_THRESHOLD":QUEUE_REFILL_THRESHOLD,
-    "RETRY_BACKOFF_SECONDS": RETRY_BACKOFF_SECONDS,
-    "MINIMAX_API_BASE":      MINIMAX_API_BASE,
-    "MINIMAX_MODEL":         MINIMAX_MODEL,
-    "MINIMAX_SPEND_CAP":     MINIMAX_SPEND_CAP,
-    "OLLAMA_BASE":           OLLAMA_BASE,
-    "OLLAMA_MODEL_CODE":     OLLAMA_MODEL_CODE,
-    "OLLAMA_MODEL_DIGEST":   OLLAMA_MODEL_DIGEST,
-}
 
 # ── LOGGING ───────────────────────────────────────────────────────────────────
 
@@ -291,6 +214,10 @@ if __name__ == "__main__":
     log.info(f"Orchestrator starting — enabled: {ENABLED_PROJECTS}")
     log.info(f"Monthly spend: ${spend_tracker.monthly_spend():.2f} / ${MINIMAX_SPEND_CAP}")
     log.info("=" * 60)
+
+    # Health checks — loud failure at startup beats silent failure at 2am
+    if not executor.check_ollama():
+        log.warning("Ollama unavailable — execution prompts will fall back to raw task descriptions")
 
     if task_queue.total_unblocked(projects=ENABLED_PROJECTS) == 0:
         _seed_sample_tasks()

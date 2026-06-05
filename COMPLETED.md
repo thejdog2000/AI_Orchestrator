@@ -125,3 +125,45 @@ Claude writes `COMMIT_REQUEST.txt` → watcher handles the rest.
 Master context doc. Feed to any AI session to restore full context without re-explaining.
 Includes verified repo paths, Ollama model names, budget, sprint schedule,
 architecture decisions, council prompting design.
+
+**Previous TODO items resolved (pre-review)**
+#14 load_context consolidated in executor.py — single source of truth.
+#17 No DB backup — nightly sqlite3 dump, 7-day rolling window.
+#18 No approval workflow — approve.py built (list/approve/reject/open).
+#19 Gap-fill UUID — uuid4().hex[:8] replaces int(time.time()).
+
+---
+
+## Security + AI Engineering Review Fixes
+
+**SEC-1 Path traversal in `_parse_file_blocks`**
+MiniMax response file paths now validated with `dest.resolve().is_relative_to(repo_path.resolve())`
+before any write. Blocked paths are logged as errors and skipped. Applied in both
+executor.py and lang_pipeline.py. If all writes are blocked, task fails rather than silently succeeding.
+
+**SEC-2 Quality gate fails closed**
+Ollama JSON parse failure now returns `{"pass": False}` with a human-review flag.
+Broken gate no longer auto-approves everything. Raw Ollama output included in reasoning for debugging.
+
+**SEC-3 Atomic spend writes**
+`spend.py._save()` writes to `.tmp` then `os.replace()`. No more corrupted spend file on crash.
+Corrupted spend file = no cap enforcement — this was the highest-consequence data loss risk.
+
+**HIGH-1/2/3 Shared config via `config.py`**
+Single source of truth for all runtime config: paths, models, API endpoints, spend cap.
+`task_generator.py` and `lang_pipeline.py` were hardcoding their own model strings/paths
+independently — both now import from `config.py`. `executor.configure()` guard added:
+raises `RuntimeError` with a clear message if called before `configure()`.
+
+**HIGH-4 Ollama health check at startup**
+`executor.check_ollama()` called before scheduler starts. Verifies reachability and that
+required models (qwen3-coder:30b, qwen3:14b) are loaded. Logs clear error with remediation
+steps rather than silently degrading all night.
+
+**MED-1 `update_context_md` wrong model**
+Was using qwen3-coder:30b (code model) for prose summarization. Fixed to OLLAMA_MODEL_DIGEST
+(qwen3:14b) — faster, adequate for markdown summarization, reduces per-task latency.
+
+**LOW-2/3 .gitignore + approve.py standalone safety**
+`backups/` and `approved/` added to .gitignore. approve.py now creates its own dirs on
+startup rather than relying on orchestrator_main having run first.

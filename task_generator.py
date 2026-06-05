@@ -30,27 +30,11 @@ from pathlib import Path
 
 from task_queue import TaskQueue, PERSPECTIVE_PROJECT_MAP
 from executor   import load_context
+from config     import MINIMAX_API_BASE, MINIMAX_MODEL, REPO_PATHS
 
 log = logging.getLogger(__name__)
 
-BASE_DIR = Path(__file__).parent
-
-MINIMAX_API_BASE = "https://api.minimax.io/v1"
-
-# NOTE: the model string for direct chat/completions calls may differ from Aider's
-# "minimax/minimax-m3". Verify at platform.minimax.io.
-# Common values: "MiniMax-Text-01", "minimax-m3", "abab6.5s-chat"
-MINIMAX_CHAT_MODEL = os.environ.get("MINIMAX_CHAT_MODEL", "minimax-m3")
-
-# Repo path map — mirrors orchestrator_main.py
-REPO_PATHS = {
-    "meridian": "meridian-mobile",
-    "rts":      "ironhold-rts",
-    "lang":     "language-travel-app",
-    "gamma":    "gamma-tool",
-    "ninja":    "ninjatrader-algos",
-    "tax":      "tax-cloud-tools",
-}
+MINIMAX_CHAT_MODEL = os.environ.get("MINIMAX_CHAT_MODEL", MINIMAX_MODEL)
 
 # ── PHASE CONFIG ──────────────────────────────────────────────────────────────
 
@@ -147,10 +131,8 @@ def _minimax_chat(
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
 def _load_context(project: str) -> str:
-    """Delegate to executor.load_context — single source of truth (fixes #14)."""
-    return load_context(project, {
-        k: BASE_DIR.parent / v for k, v in REPO_PATHS.items()
-    }, max_chars=2400)
+    """Delegate to executor.load_context using absolute REPO_PATHS from config."""
+    return load_context(project, REPO_PATHS, max_chars=2400)
 
 
 def _select_perspectives(project: str, sprint_phase: str, max_count: int = 3) -> list:

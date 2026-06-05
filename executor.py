@@ -24,7 +24,38 @@ def configure(cfg: dict):
     """Called once from orchestrator_main with shared config."""
     _config.update(cfg)
 
+
+def check_ollama() -> bool:
+    """
+    Verify Ollama is reachable and required models are loaded.
+    Call at startup before scheduler begins — silent failures overnight are worse
+    than a loud startup error.
+    Returns True if healthy, False if not.
+    """
+    import requests as _req
+    base = cfg.get("OLLAMA_BASE", "http://localhost:11434") if (cfg := _config) else "http://localhost:11434"
+    try:
+        resp = _req.get(f"{base}/api/tags", timeout=5)
+        resp.raise_for_status()
+        loaded = {m["name"] for m in resp.json().get("models", [])}
+        required = {_config.get("OLLAMA_MODEL_CODE", ""), _config.get("OLLAMA_MODEL_DIGEST", "")}
+        missing  = {m for m in required if m and m not in loaded}
+        if missing:
+            log.error(f"Ollama missing required models: {missing}. Run: ollama pull <model>")
+            return False
+        log.info(f"Ollama healthy — models loaded: {required}")
+        return True
+    except Exception as e:
+        log.error(f"Ollama unreachable at {base}: {e}")
+        log.error("Tasks will proceed with degraded prompts until Ollama is available.")
+        return False
+
 def _cfg(key: str):
+    if not _config:
+        raise RuntimeError(
+            "executor.configure(CFG) must be called before any executor functions. "
+            "Import orchestrator_main or call executor.configure(CFG) explicitly."
+        )
     return _config[key]
 
 
@@ -119,10 +150,16 @@ def evaluate_diff(diff_text: str, task: dict) -> dict:
     )
     raw = ollama_generate(prompt, max_tokens=300, json_mode=True)
     try:
-        return json.loads(raw)
-    except Exception:
-        log.warning(f"[{task['project']}] Quality gate returned unparseable JSON — defaulting pass")
-        return {"score": 5, "pass": True, "issues": [], "reasoning": "parse_failed"}
+        result = json.loads(raw)
+        # Validate required keys are present and types are correct
+        if not isinstance(result.get("pass"), bool):
+            raise ValueError("missing or non-bool 'pass' field")
+        return result
+    except Exception as e:
+        # Fail CLOSED — broken gate must not auto-approve bad output
+        log.warning(f"[{task['project']}] Quality gate parse failed ({e}) — failing closed for human review")
+        return {"score": 0, "pass": False, "issues": ["quality_gate_parse_failed"],
+                "reasoning": f"Ollama returned unparseable response — human review required. Raw: {raw[:200]}"}
 
 
 # ── CONTEXT.MD FEEDBACK LOOP ──────────────────────────────────────────────────
@@ -151,7 +188,8 @@ def update_context_md(task: dict, diff_text: str, repo_path: Path) -> bool:
         f"Output the complete updated CONTEXT.md — nothing else:"
     )
 
-    updated = ollama_generate(prompt, max_tokens=1500, model=_cfg("OLLAMA_MODEL_CODE"))
+    # Use digest model — CONTEXT.md update is prose summarization, not code generation
+    updated = ollama_generate(prompt, max_tokens=1500, model=_cfg("OLLAMA_MODEL_DIGEST"))
     if updated and len(updated) > 100:
         context_path.write_text(updated)
         log.info(f"[{task['project']}] CONTEXT.md updated ({len(updated)} chars)")
@@ -172,6 +210,27 @@ def _parse_file_blocks(response: str) -> dict:
     Returns {relative_path: content}.
     """
     return {m.group(1).strip(): m.group(2) for m in _FILE_PATTERN.finditer(response)}
+
+
+def _safe_write(repo_path: Path, rel_path: str, content: str) -> bool:
+    """
+    Write a file only if its resolved path is inside repo_path.
+    Blocks path traversal attacks (e.g. ../../.env from a hallucinating model).
+    Returns True if written, False if blocked.
+    """
+    try:
+        dest = (repo_path / rel_path).resolve()
+    except Exception as e:
+        log.error(f"Path resolution failed for '{rel_path}': {e}")
+        return False
+
+    if not dest.is_relative_to(repo_path.resolve()):
+        log.error(f"BLOCKED path traversal attempt: '{rel_path}' → {dest}")
+        return False
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(content)
+    return True
 
 
 def _minimax_chat(
@@ -258,11 +317,17 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
         log.warning(f"[{project}] No file blocks for {task['id']}. Preview: {content[:300]}")
         return {"success": False, "error": "no_file_blocks"}
 
+    written = []
     for rel_path, file_content in file_blocks.items():
-        dest = repo_path / rel_path
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(file_content)
-        log.info(f"[{project}] Wrote {rel_path}")
+        if _safe_write(repo_path, rel_path, file_content):
+            log.info(f"[{project}] Wrote {rel_path}")
+            written.append(rel_path)
+        else:
+            log.warning(f"[{project}] Skipped unsafe path: {rel_path}")
+
+    if not written:
+        log.error(f"[{project}] All file writes blocked for {task['id']} — possible path traversal")
+        return {"success": False, "error": "all_writes_blocked"}
 
     subprocess.run(["git", "add", "--intent-to-add", "."],
                    cwd=repo_path, capture_output=True)

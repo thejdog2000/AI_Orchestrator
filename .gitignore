@@ -35,6 +35,10 @@ venv/
 # Node (for lang pipeline smoke tests)
 node_modules/
 
+# Runtime output dirs — don't track generated/operational content
+backups/
+approved/
+
 # Keep these — they're source of truth for task backlogs
 !tasks/*.json
 

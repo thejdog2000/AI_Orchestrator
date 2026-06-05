@@ -6,62 +6,56 @@ Priority: 🔴 do before first overnight run | 🟡 do before multi-project run 
 
 ## 🔴 Before First Overnight Run
 
-**#18 No approval workflow — diffs accumulate in pending_review/ forever**
-Diffs are written but never cleared. Count grows in digest, never goes down.
-Without this, you have no way to act on overnight output from the CLI.
-Build `approve.py`:
-- `python approve.py <task_id>` — applies diff, marks task completed in DB, moves diff to `approved/`
-- `python approve.py --list` — shows all pending with review_priority order
-- `python approve.py --reject <task_id>` — marks failed, deletes diff
+**Verify MiniMax direct API model name**
+`MINIMAX_MODEL = "minimax-m3"` in orchestrator_main.py is an assumed value.
+Confirm the actual chat/completions model string at platform.minimax.io before first run.
+Wrong model name = silent 404 on every task execution.
+
+**Set API key and test Ollama connectivity**
+```bash
+export MINIMAX_API_KEY="..."
+curl http://localhost:11434/api/tags   # verify Ollama is running
+ollama list                            # verify qwen3-coder:30b and qwen3:14b present
+```
+
+**executor.py `configure()` must be called before any task runs**
+`executor.configure(CFG)` is called in orchestrator_main.py on import, but if
+any module imports executor directly (e.g. tests, scripts) without going through
+main, `_config` will be empty and all `_cfg()` calls will KeyError.
+Consider a guard: raise a clear error if `_config` is empty when `_cfg()` is called.
 
 ---
 
 ## 🟡 Before Multi-Project Run
 
-**#14 `get_context_md` duplicated in main.py and task_generator.py**
-Two implementations with slightly different path logic — will silently drift.
-Consolidate into `load_context(project)` in `task_queue.py`, import from both.
+**Wire lang_pipeline into orchestrator_main scheduler**
+`run_lang_nightly` is imported and scheduled — but `lang_pipeline.py` uses its own
+hardcoded `OLLAMA_BASE`, `MINIMAX_API_BASE`, `MINIMAX_MODEL`, `OLLAMA_MODEL_CODE`.
+These should come from the shared CFG dict (via `configure()`) to avoid drift.
 
-**CONTEXT.md updater — closes the core feedback loop**
-Currently MiniMax's output never feeds back to improve future prompts.
-After each successful task, Ollama should read `diff + old CONTEXT.md + task description`
-and write an updated CONTEXT.md: what was built, which files changed, known issues.
-Next prompt-writing call reads the updated context → MiniMax gets better instructions.
-Without this, every overnight run starts with a static project snapshot.
-Lives in `executor.py` (after module split). ~40 lines. High value.
+**task_generator.py `_load_context` REPO_PATHS mapping**
+`_load_context` builds paths as `BASE_DIR.parent / v` where `v` is a string from
+`REPO_PATHS`. But `lang` and `gamma` are under `~/Documents/claude/projects/`, not
+`~/projects/`. The parent join logic will produce wrong paths for those two.
+Fix: pass the full `REPO_PATHS` dict (with absolute Paths) from CFG.
 
-**Smarter retries — prompt revision on failure**
-Current retry: fail → clean git → same prompt again. No learning.
-Better: on quality gate failure, Ollama reads `[task + diff + evaluation.issues]`
-and writes a revised prompt addressing the specific failure before attempt 2.
-One extra Ollama call per failed attempt, meaningfully higher retry success rate.
-
-**#17 No SQLite DB backup**
-`orchestrator.db` gitignored (correct). Machine crash = all task history lost.
-Add nightly job: `sqlite3 orchestrator.db .dump > backups/tasks_YYYY-MM-DD.sql`
-Schedule via APScheduler alongside digests. Keep 7 days of backups.
+**Add `python approve.py` to morning routine docs**
+`approve.py` is built but not mentioned in `ORCHESTRATOR_CONTEXT.md`'s daily rhythm
+section. Jacob needs to know to run it each morning alongside reading the digest.
 
 ---
 
 ## ⚪ Polish / Low Risk
 
-**Split main.py into modules**
-File is 500+ lines and growing. Large reads burn tokens in every AI session.
-Target split:
-- `orchestrator_main.py` — scheduler, entry point, config (~100 lines)
-- `executor.py` — `run_minimax_task`, `_parse_file_blocks`, `_minimax_execute`, `_run_task`
-- `spend.py` — `SpendTracker`
-- `digests.py` — `generate_digest`, `_write_digest`, digest scheduler functions
-Smaller files = targeted reads, cheaper future sessions.
+**DB backup requires `sqlite3` CLI on PATH**
+`backup_db()` uses `subprocess.run(["sqlite3", ...])`. If sqlite3 CLI isn't installed
+(it usually is on macOS), backup silently fails. Add a Python-native fallback using
+`sqlite3` stdlib: `conn.iterdump()`.
 
-**#19 Gap-fill task IDs — 1-second resolution collision**
-`int(time.time())` in `task_queue.get_gap_fill_tasks()`.
-Two calls in the same second → SQLite PRIMARY KEY conflict, silently drops insertion.
-Fix: `uuid4()` for gap-fill IDs.
+**approve.py `--open` uses $PAGER fallback to `less`**
+Works on macOS. Consider also trying `delta` or `diff-so-fancy` if installed,
+for syntax-highlighted diff viewing.
 
-**lang_pipeline.py — dedicated language scene pipeline**
-Scene generation is currently handled by the generic `run_minimax_task` path.
-A dedicated pipeline would: follow the 7-night schedule explicitly, run Node smoke tests
-automatically after each scene, retry failed scenes the next night, track scene-specific
-pass/fail separately from code task history.
-Lower priority since generic path works, but gives better observability for the lang project.
+**git_watcher.py not added to login items yet**
+Currently requires manual `python3 git_watcher.py &` each session.
+Add to macOS login items or launchd plist for persistence across reboots.

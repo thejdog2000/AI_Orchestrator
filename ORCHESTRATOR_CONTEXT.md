@@ -11,6 +11,29 @@
 - **Timeline:** 7-day MiniMax promo sprint active NOW, then ongoing post-sprint cadence
 - **Role:** Jacob = world interfacer, creative director, human approval gate. AI = builder.
 
+## Repo Paths (absolute, verified)
+
+```
+~/Documents/claude/projects/language-travel-app/   ← lang
+~/Documents/claude/projects/gamma-tool/            ← gamma
+~/projects/meridian/                               ← meridian web
+~/projects/meridian-mobile/                        ← meridian mobile (sprint target)
+~/projects/ironhold-rts/                           ← rts
+~/projects/ninjatrader-algos/                      ← ninja
+~/projects/tax-cloud-tools/                        ← tax
+~/projects/Orchestrator/                           ← this repo
+```
+
+## Ollama Models (verified via `ollama list`)
+
+```
+qwen3-coder:30b   — primary: Aider prompt writing, code-adjacent tasks
+qwen3:14b         — digest prose, lightweight summarization (faster, cheaper on CPU)
+bge-m3:latest     — embeddings only if needed (not used in orchestrator currently)
+```
+
+Do NOT use: llama3 (not installed). Always verify model name before running.
+
 ---
 
 ## Budget
@@ -36,26 +59,46 @@
 
 ```
 LAYER 1 — ORCHESTRATION (free, local)
-  Ollama 30B        task decomposition, Aider prompt writing, post-run triage,
-                    CONTEXT.md updates, digest prose generation
+  Ollama 30B        ONLY: digest prose generation, Aider prompt writing
+                    NOT for task generation or quality gates on hard diffs
+                    num_ctx must be set to 8192 on every call (not the default 2048)
+                    json_mode=True on any call expecting structured output
   Python daemon     APScheduler cron, subprocess Aider calls, spend tracking,
                     approval queue management, dashboard rendering
-  
-  Ollama CANNOT: read full codebases, make direct API calls, call tools 
-  autonomously, do hard codegen. Python makes all actual calls.
+
+  Ollama CANNOT: reliably run multi-persona council debates, generate valid JSON
+  without json_mode, maintain format adherence past ~2 personas, or reason over
+  prompts > 2048 tokens without explicit num_ctx override.
   Ollama speaks text → Python parses/validates → Python executes.
 
-LAYER 2 — PRIMARY EXECUTION (~$70/mo)
-  MiniMax M3 PAYG   primary Aider backend, language scene generation, 
-                    RTS C# generation, all overnight autonomous work
-  Aider CLI         repo-aware codegen via subprocess, --no-auto-commits always,
-                    diffs queue for Jacob approval before any merge
+LAYER 2 — PRIMARY EXECUTION + TASK GENERATION (~$70/mo)
+  MiniMax M3 PAYG   (a) Direct task execution: Python loads explicit file context,
+                        calls MiniMax API, parses response, writes files directly.
+                        NO Aider subprocess — full token visibility and context control.
+                    (b) Council task generation: sequential perspective calls + merge
+                        ~5k tokens/generation run ≈ $0.01 — negligible vs $65 cap
+                    (c) Quality gate for high-complexity tasks (Ollama skips these)
 
-LAYER 3 — ESCALATION (~$30/mo)  
-  Claude Haiku API  when MiniMax output quality insufficient
-  Claude Sonnet API only if Haiku also fails — not auto-escalated
-  Never auto-escalate to Sonnet. Flag for human review instead.
+  NO AIDER: replaced with direct MiniMax API calls.
+  Reasons: Aider is interactive-first, subprocess is a black box, token costs
+  unobservable, full repo scan on every call, no programmatic file targeting.
+
+LAYER 3 — ESCALATION
+  REMOVED. No Claude API dependency.
+  On failure: log, mark failed, move to next task. Jacob reviews in morning digest.
 ```
+
+### Load Distribution
+
+| Task | Model | Reason |
+|---|---|---|
+| Digest prose | qwen3:14b (Ollama) | Faster on lighter model, simple summarization |
+| Execution prompt writing | qwen3-coder:30b (Ollama) | Code-adjacent templating |
+| Council task generation | MiniMax direct API | 30B unreliable on council; $0.01/run negligible |
+| Quality gate — low/medium | qwen3-coder:30b (Ollama) | Yes/no on simple criteria — adequate |
+| Quality gate — high complexity | Skip, queue for human review | Don't trust local model on hard diffs |
+| Task execution (all codegen) | MiniMax direct API | Full token control, no subprocess black box |
+| Escalation | None — removed | Fail → log → next task |
 
 ---
 
@@ -362,26 +405,30 @@ aider \
 
 ```
 ~/projects/
-  orchestrator/
-    main.py               # APScheduler daemon (see CODE file)
-    task_queue.py         # priority queue logic
-    aider_runner.py       # subprocess wrapper
-    quality_gate.py       # Ollama evaluation
-    digest.py             # report generation
-    spend_tracker.py      # token/cost logging
+  Orchestrator/               # git repo: github.com/thejdog2000/AI_Orchestrator
+    orchestrator_main.py      # APScheduler daemon, spend tracker, Aider runner
+    task_queue.py             # SQLite-backed queue (orchestrator.db)
+                              #   fields: complexity, rationale, effort_category,
+                              #           perspective, review_priority (1-5)
+    task_generator.py         # Council task generation via MiniMax direct API
+                              #   sequential perspective calls + JSON merge pass
+    dashboard_generator.py    # Generates dashboard/index.html (static Kanban)
+    lang_pipeline.py          # TODO: nightly language scene generation (separate from Aider)
+    ORCHESTRATOR_CONTEXT.md   # This file — feed to any AI session to restore context
+    .gitignore                # excludes: .env, orchestrator.db, logs/, pending_review/
     tasks/
-      meridian.json       # pre-loaded task backlog
+      lang.json               # pre-loaded task backlogs (seeded, then SQLite takes over)
+      meridian.json
       rts.json
-      lang.json
       gamma.json
       ninja.json
       tax.json
-    pending_review/       # diffs waiting for Jacob approval
+    pending_review/           # diffs waiting for Jacob approval
     logs/
-      spend.json          # daily token/cost log
-      completed.json      # task completion history
+      orchestrator.log        # main runtime log
+      spend.json              # daily token/cost tracking
     dashboard/
-      index.html          # morning digest render
+      index.html              # regenerated each digest — open in browser, no server needed
   
   meridian/               # existing Next.js web app
   meridian-mobile/        # new Expo project (sprint day 1)
@@ -438,12 +485,42 @@ Target: medium scenario. Ollama handles routing/digest/orchestration (free). Min
 
 ---
 
+## Council Prompting Design
+
+Task generation uses a sequential council pattern (NOT a debate format):
+1. Select 3 perspectives relevant to the project + current sprint phase
+2. One MiniMax call per perspective → 3 task proposals in structured text
+3. One final MiniMax merge call (json_mode=True) → deduplicated JSON task array
+
+Why sequential over debate:
+- Debate format (ADVISOR rebutting ADVISOR) breaks on all models past ~2 personas
+- Sequential independent proposals then merge gets better coverage without fragility
+- json_mode=True on the merge call guarantees parseable output
+
+Perspective selection is phase-weighted (see PHASE_PERSPECTIVE_PRIORITY in task_generator.py):
+- architecture phase → engineering_architect, systems_architect, devops
+- feature phase → product_manager, mobile_ux_designer/game_designer, engineering_architect
+- polish phase → qa_tester, game_feel_engineer/speech_linguist, product_manager
+- demo_prep phase → product_manager, game_designer/mobile_ux_designer, client_success
+
+Sprint phase per project is set in SPRINT_PHASES dict in orchestrator_main.py.
+Update it as sprints progress — the council will shift its recommendations accordingly.
+
 ## Key Decisions Made (don't re-litigate)
 
 - **MiniMax M3 PAYG** over subscription plans — better for bursty async workloads, no rate windows
-- **Aider** over custom codegen — already installed, handles repo context, file selection, diff application
-- **Ollama as orchestrator only** — not executor. Python makes all actual calls.
-- **--no-auto-commits always** — diffs never merge without Jacob seeing them
+- **No Aider** — direct MiniMax API calls: Python loads explicit files, calls API, parses response,
+  writes files. Full token visibility, no subprocess black box, no full-repo scans.
+- **No Claude escalation** — removed entirely. Fail → log → next task. MiniMax + Ollama only.
+- **qwen3-coder:30b** for execution prompts; **qwen3:14b** for digest prose (faster/cheaper)
+- **Ollama for digest + prompt writing only** — not task generation or hard quality gates
+- **MiniMax for council task generation** — direct API calls
+- **Sequential council (not debate)** — one call per perspective, merge pass separate
+- **Per-project locks** not global — lang + meridian can run simultaneously (different repos)
+- **BackgroundScheduler + 2-min interval** — BlockingScheduler skips fires if task runs long
+- **num_ctx: 8192 on all Ollama calls** — default 2048 silently truncates
+- **json_mode=True on Ollama calls expecting JSON** — prevents markdown wrapping breaking parser
+- **Absolute repo paths** — relative paths silently fail if cwd is wrong at launch
 - **No overnight Aider on Unity** — untestable without headless Unity, daytime only
 - **Language app first** for pipeline testing — lowest stakes, auto-testable with Node smoke tests
 - **React Native + Expo** for Meridian mobile — shares all existing API routes, TypeScript types, auth logic

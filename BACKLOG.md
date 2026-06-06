@@ -257,7 +257,7 @@ Requires: add `temperature` param to `ollama_generate()` in `executor.py`, updat
 
 ---
 
-## 🟡 FEAT-1: Persona Files
+## ✅ FEAT-1: Persona Files *(implemented 2026-06-06)*
 
 **Full definitions for all council perspectives. Replaces bare role strings with rich context.**
 

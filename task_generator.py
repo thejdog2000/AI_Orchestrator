@@ -30,7 +30,9 @@ from pathlib import Path
 
 from task_queue import TaskQueue, PERSPECTIVE_PROJECT_MAP
 from executor   import load_context
-from config     import MINIMAX_API_BASE, MINIMAX_MODEL, REPO_PATHS
+from config     import MINIMAX_API_BASE, MINIMAX_MODEL, REPO_PATHS, BASE_DIR
+
+PERSONAS_DIR = BASE_DIR / "personas" / "domain"
 
 log = logging.getLogger(__name__)
 
@@ -135,6 +137,19 @@ def _load_context(project: str) -> str:
     return load_context(project, REPO_PATHS, max_chars=2400)
 
 
+def _load_persona(perspective: str) -> str:
+    """
+    Load domain expert persona from personas/domain/{perspective}.md.
+    Falls back to bare role string if file not found.
+    Returns the persona content to inject into the perspective system prompt.
+    """
+    persona_file = PERSONAS_DIR / f"{perspective}.md"
+    if persona_file.exists():
+        return persona_file.read_text().strip()
+    log.debug(f"No persona file for {perspective} — using bare role string")
+    return f"You are a {perspective.replace('_', ' ')}."
+
+
 def _select_perspectives(project: str, sprint_phase: str, max_count: int = 3) -> list:
     """Return the most relevant perspectives for this project + phase."""
     project_perspectives = {
@@ -175,10 +190,12 @@ def _call_perspective(
     Returns structured text proposals — NOT JSON.
     Structured text is more reliable than asking 30B+ models to produce JSON mid-chain.
     JSON extraction happens in the separate merge pass.
+    Persona file content (personas/domain/{perspective}.md) is injected as the system prompt.
     """
+    persona_content = _load_persona(perspective)
     system = (
-        f"You are a {perspective.replace('_', ' ')} advising on a software project. "
-        f"Be direct, specific, and stay in your domain. "
+        f"{persona_content}\n\n"
+        f"You are advising on a software project. Be direct, specific, and stay in your domain. "
         f"Propose only tasks appropriate for the {sprint_phase} phase."
     )
 

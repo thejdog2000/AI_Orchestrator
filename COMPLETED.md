@@ -167,3 +167,29 @@ Was using qwen3-coder:30b (code model) for prose summarization. Fixed to OLLAMA_
 **LOW-2/3 .gitignore + approve.py standalone safety**
 `backups/` and `approved/` added to .gitignore. approve.py now creates its own dirs on
 startup rather than relying on orchestrator_main having run first.
+
+---
+
+## Documentation Restructure
+
+Split `ORCHESTRATOR_CONTEXT.md` (was 600+ lines, ~8000 tokens) into focused docs:
+- `ORCHESTRATOR_CONTEXT.md` — slim entry point (~600 tokens). Load every session.
+- `ARCHITECTURE.md` — technical design, execution flow, module map, security.
+- `PROJECTS.md` — all 6 projects, sprint phases, warm opportunities.
+- `BACKLOG.md` — future features with full specs (split from TODO.md).
+- `TODO.md` — active near-term work only.
+
+AI sessions now load only what's relevant — task-specific sessions save ~5000 tokens.
+
+## Design Decisions Locked (from design conversation)
+
+**Auto-commit (90-95% of tasks):** `pending_review/` accumulation removed.
+Tasks auto-commit after path guard passes. Everything's in git — bad output gets `git revert`.
+`approval_required=True` stays for JWT auth, schema migrations, client deliverables only.
+
+**Discord bot as primary interface:** PA model — orchestrator pushes to Jacob,
+Jacob directs via natural language. Replaces polling approve.py / reading logs.
+Cowork (Claude) handles deep-work sessions. `o` CLI alias for terminal use.
+
+**Quality gate and feedback loops deprioritized:** local Ollama isn't reliable enough
+for meaningful evaluation. Auto-commit + git revert is the practical safety net.

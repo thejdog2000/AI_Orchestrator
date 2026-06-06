@@ -210,7 +210,7 @@ Requires: `pip install ghp-import` + GitHub Pages enabled on repo settings.
 
 ---
 
-## 🟠 FEAT-Validate: Pre-Flight Checklist (`validate.py`)
+## ✅ FEAT-Validate: Pre-Flight Checklist (`validate.py`) *(implemented 2026-06-06)*
 
 **One command before first overnight run. Loud failures beat silent 2am debugging.**
 

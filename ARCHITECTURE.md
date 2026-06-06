@@ -125,7 +125,10 @@ o.py                   CLI alias — same intent parsing as #chat, usable from t
                          Usage: o status | o "approve all lang" | o help
 
 ── Planned ────────────────────────────────────────────────────────
-validate.py            TODO: pre-flight checklist (see BACKLOG.md)
+validate.py            Pre-flight checklist: run before first overnight session.
+                         Checks Ollama, models, env vars, repos, DB, git_watcher,
+                         Discord API. Shows fix commands with --fix flag.
+                         Usage: python validate.py [--fix]
 personas/domain/       TODO: domain expert persona files (see BACKLOG.md FEAT-1)
 personas/review/       TODO: reader persona files (see BACKLOG.md FEAT-1)
 ```

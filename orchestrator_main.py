@@ -32,7 +32,7 @@ import notify
 from config      import (CFG, BASE_DIR, TASKS_DIR, PENDING_DIR, APPROVED_DIR,
                           LOGS_DIR, BACKUPS_DIR, DASHBOARD_DIR, PID_FILE, DB_PATH,
                           PROJECTS, ENABLED_PROJECTS, MINIMAX_SPEND_CAP, REPO_PATHS,
-                          DASHBOARD_PORT)
+                          DASHBOARD_PORT, METRICS_INTERVAL_HOURS)
 from spend       import SpendTracker
 from task_queue  import TaskQueue
 from dashboard_generator import generate as generate_dashboard
@@ -228,6 +228,17 @@ def _run_lang_nightly_with_notify():
 
 
 scheduler.add_job(_run_lang_nightly_with_notify, "cron", hour=22, minute=0, id="lang_nightly")
+
+# Metrics snapshot to #orchestrator-metrics every N hours (default 10)
+from metrics import post_metrics_snapshot as _post_metrics
+scheduler.add_job(
+    _post_metrics,
+    "interval",
+    hours=METRICS_INTERVAL_HOURS,
+    id="metrics_snapshot",
+    max_instances=1,
+    coalesce=True,
+)
 
 # ── ENTRY POINT ───────────────────────────────────────────────────────────────
 

@@ -95,8 +95,12 @@ SPRINT_GOALS = {
 # Bot token: discord.com/developers/applications → your app → Bot → Token
 #
 # Never hardcode tokens here — env vars only.
+#
+# DISCORD_CHANNEL_METRICS — new #orchestrator-metrics channel for FEAT-4 snapshots
+# METRICS_INTERVAL_HOURS  — how often to post metrics (default 10)
 
-DASHBOARD_PORT = int(__import__("os").environ.get("DASHBOARD_PORT", "8080"))
+DASHBOARD_PORT        = int(__import__("os").environ.get("DASHBOARD_PORT", "8080"))
+METRICS_INTERVAL_HOURS = int(__import__("os").environ.get("METRICS_INTERVAL_HOURS", "10"))
 
 # ── SHARED CFG DICT (passed to executor.configure, digests.configure) ─────────
 
@@ -120,5 +124,6 @@ CFG = {
     "OLLAMA_BASE":            OLLAMA_BASE,
     "OLLAMA_MODEL_CODE":      OLLAMA_MODEL_CODE,
     "OLLAMA_MODEL_DIGEST":    OLLAMA_MODEL_DIGEST,
-    "DASHBOARD_PORT":         DASHBOARD_PORT,
+    "DASHBOARD_PORT":          DASHBOARD_PORT,
+    "METRICS_INTERVAL_HOURS":  METRICS_INTERVAL_HOURS,
 }

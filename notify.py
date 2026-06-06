@@ -30,6 +30,7 @@ _CHANNEL_VARS = {
     "live":    "DISCORD_CHANNEL_LIVE",
     "blocked": "DISCORD_CHANNEL_BLOCKED",
     "chat":    "DISCORD_CHANNEL_CHAT",
+    "metrics": "DISCORD_CHANNEL_METRICS",
 }
 
 # Discord embed colors

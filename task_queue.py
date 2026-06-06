@@ -94,6 +94,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     committed_at     TEXT,
     commit_hash      TEXT    DEFAULT '',
     description_hash TEXT    DEFAULT '',
+    system_prompt    TEXT    DEFAULT '',
+    quality_gate_skipped INTEGER DEFAULT 0,
+    rejection_reason TEXT    DEFAULT '',
+    rejected_at      TEXT,
     notes            TEXT    DEFAULT ''
 );
 
@@ -144,6 +148,11 @@ class TaskQueue:
 
     def _init_db(self):
         with self._conn() as conn:
+            # WAL mode: concurrent readers don't block writers; required for
+            # multi-project execution where scheduler fires overlap with bot queries.
+            # busy_timeout: wait up to 5s instead of immediately raising "database is locked".
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
             conn.executescript(_SCHEMA)
 
     # ── WRITE ────────────────────────────────────────────────────────────────
@@ -215,7 +224,8 @@ class TaskQueue:
         """Update task status and any additional fields passed as kwargs."""
         allowed = {
             "started_at", "completed_at", "committed_at", "commit_hash",
-            "diff_path", "aider_prompt",
+            "diff_path", "aider_prompt", "system_prompt", "quality_gate_skipped",
+            "rejection_reason", "rejected_at",
             "actual_tokens", "cost_usd", "model_used", "quality_score", "notes"
         }
         fields = {k: v for k, v in kwargs.items() if k in allowed}
@@ -258,6 +268,17 @@ class TaskQueue:
     def mark_failed(self, task: dict, notes: str = ""):
         self.update_status(task["id"], "failed",
                            completed_at=datetime.now().isoformat(), notes=notes)
+
+    def mark_rejected(self, task: dict, reason: str = ""):
+        """Mark a pending_review task as rejected with an optional reason (FEAT-3)."""
+        self.update_status(
+            task["id"], "failed",
+            completed_at=datetime.now().isoformat(),
+            rejected_at=datetime.now().isoformat(),
+            rejection_reason=reason,
+            notes=f"rejected: {reason}" if reason else "rejected",
+        )
+        log.info(f"[{task['project']}] {task['id']} → rejected ({reason or 'no reason'})")
 
     # ── READ ─────────────────────────────────────────────────────────────────
 
@@ -340,6 +361,95 @@ class TaskQueue:
                 "SELECT COALESCE(SUM(cost_usd), 0) FROM tasks"
             ).fetchone()[0]
         return {r["status"]: r["n"] for r in rows} | {"total_cost_usd": round(cost, 4)}
+
+    # ── METRICS ──────────────────────────────────────────────────────────────
+
+    def metrics_data(self, days: int = 30) -> dict:
+        """
+        Return all data needed for FEAT-4 metrics dashboard.
+        Covers: pass rate, cost, throughput, perspective performance, queue health.
+        """
+        since = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        # Compute since date for rolling window
+        import datetime as dt
+        cutoff = (datetime.now() - dt.timedelta(days=days)).isoformat()
+
+        with self._conn() as conn:
+            # Quality gate stats (tasks that went through the gate — not approval_required high complexity)
+            gate_rows = conn.execute("""
+                SELECT quality_score, quality_gate_skipped, project, perspective, complexity
+                FROM tasks
+                WHERE created_at >= ? AND status IN ('completed', 'failed')
+            """, (cutoff,)).fetchall()
+
+            # Cost by project
+            cost_rows = conn.execute("""
+                SELECT project, SUM(cost_usd) as total, COUNT(*) as n
+                FROM tasks
+                WHERE created_at >= ? AND status = 'completed'
+                GROUP BY project
+            """, (cutoff,)).fetchall()
+
+            # Throughput: committed tasks per day
+            throughput_rows = conn.execute("""
+                SELECT date(committed_at) as day, COUNT(*) as n
+                FROM tasks
+                WHERE committed_at >= ? AND status = 'completed'
+                GROUP BY day ORDER BY day
+            """, (cutoff,)).fetchall()
+
+            # Perspective acceptance (committed / attempted)
+            perspective_rows = conn.execute("""
+                SELECT perspective,
+                       COUNT(*) as attempted,
+                       SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as committed,
+                       SUM(cost_usd) as cost
+                FROM tasks
+                WHERE created_at >= ?
+                GROUP BY perspective
+            """, (cutoff,)).fetchall()
+
+            # Current queue health
+            queue_rows = conn.execute("""
+                SELECT status, COUNT(*) as n, project
+                FROM tasks
+                GROUP BY status, project
+            """).fetchall()
+
+            # Recent failures
+            fail_rows = conn.execute("""
+                SELECT id, project, description, notes, completed_at
+                FROM tasks WHERE status='failed'
+                ORDER BY completed_at DESC LIMIT 10
+            """).fetchall()
+
+        # Process
+        gate_total  = len(gate_rows)
+        gate_passed = sum(1 for r in gate_rows if r["quality_score"] and r["quality_score"] >= 6)
+        gate_rate   = round(gate_passed / gate_total * 100, 1) if gate_total else 0.0
+
+        return {
+            "quality_gate": {
+                "pass_rate":   gate_rate,
+                "passed":      gate_passed,
+                "total":       gate_total,
+            },
+            "cost_by_project": {r["project"]: {"total": round(r["total"] or 0, 4), "n": r["n"]}
+                                 for r in cost_rows},
+            "throughput_by_day": {r["day"]: r["n"] for r in throughput_rows if r["day"]},
+            "perspectives": [
+                {
+                    "name":       r["perspective"],
+                    "attempted":  r["attempted"],
+                    "committed":  r["committed"],
+                    "rate":       round(r["committed"] / r["attempted"] * 100, 1) if r["attempted"] else 0,
+                    "cost":       round(r["cost"] or 0, 4),
+                }
+                for r in perspective_rows if r["perspective"]
+            ],
+            "queue_health":   [dict(r) for r in queue_rows],
+            "recent_failures": [dict(r) for r in fail_rows],
+        }
 
     # ── GAP-FILL ─────────────────────────────────────────────────────────────
 

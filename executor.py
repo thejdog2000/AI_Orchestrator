@@ -159,7 +159,8 @@ def evaluate_diff(diff_text: str, task: dict) -> dict:
     """
     if task.get("complexity") == "high":
         log.info(f"[{task['project']}] High-complexity — skipping Ollama gate")
-        return {"score": 7, "pass": True, "issues": [], "reasoning": "High complexity — human review"}
+        return {"score": 7, "pass": True, "issues": [], "reasoning": "High complexity — human review",
+                "gate_skipped": True}
 
     prompt = (
         f"Evaluate this code diff.\n"
@@ -525,6 +526,7 @@ def run_task(task: dict, spend_tracker, task_queue):
             actual_tokens=result.get("output_tokens", 0),
             cost_usd=cost,
             model_used=_cfg("MINIMAX_MODEL"),
+            system_prompt=result.get("system_prompt", "")[:2000],  # store for auditability
         )
         result["commit_hash"] = commit_hash
         _notify().task_committed(task, result, monthly, cap)

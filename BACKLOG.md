@@ -170,7 +170,7 @@ o "what happened overnight"
 o "approve all lang"
 o status
 ```
-Add to `~/.zshrc`: `alias o="python3 ~/projects/Orchestrator/o.py"`
+Add to `~/.zshrc`: `alias o="python3 ~/projects/Orchestrator/agents/o.py"`
 
 ---
 
@@ -297,24 +297,104 @@ export SMTP_USER="..." SMTP_PASS="..." NOTIFY_EMAIL="..."
 
 ---
 
-## ⚪ FEAT-3: Rejection Feedback Loop
+## 🟡 FEAT-3: Rejection Feedback Loop
 
-**Lower priority per Jacob — Ollama quality gate isn't reliable enough to make this high-value yet.**
+**Prerequisite: FEAT-4 metrics tracking must be in place first (need rejection rate data).**
 
-When Jacob rejects a diff via Discord or approve.py:
-- Capture optional reason ("wrong approach", "too broad", etc.)
-- Store in task record
-- Include recent rejections in next council prompt for that project
-- Track rejection rate per perspective over time
+When Jacob rejects a task via Discord (`reject task_id`) or `approve.py --reject`:
 
-Hold until quality gate reliability improves or we upgrade to a stronger local model.
+**Data capture:**
+- Prompt for optional reason via Discord: "Why rejected? (wrong approach / too broad / bad quality / off-phase / other)"
+- Store `rejection_reason TEXT` and `rejected_by TEXT` in task record
+- Add `rejection_count` per perspective to metrics
+
+**Feedback injection (council prompt augmentation):**
+- Before each council run for a project, load the last 5 rejections for that project
+- Inject into the perspective system prompt: "Recent rejections for this project: ..."
+- Format: "Rejected: {description} — Reason: {reason}"
+
+**Tracking:**
+- `metrics.py` (FEAT-4) tracks rejection rate per perspective per project
+- Perspectives with >30% rejection rate get deprioritized in `_select_perspectives()`
+
+**Files:**
+- `task_queue.py`: add `rejection_reason TEXT` and `rejected_at TEXT` columns; `mark_rejected(task, reason)` method
+- `agents/orchestrator_bot.py`: after `reject` command, ask for reason and call `mark_rejected`
+- `approve.py`: `--reject` prompts for reason, stores it
+- `task_generator.py`: load recent rejections, inject into `_call_perspective()` system prompt
+
+**Hold condition:** implement after FEAT-4 gives us the rejection rate signal to validate the feedback is working.
 
 ---
 
-## ⚪ FEAT-4: Evaluation Metrics Dashboard
+## ✅ FEAT-4: Evaluation Metrics Dashboard + Discord #metrics Channel *(implemented 2026-06-06)*
 
-**Lower priority per Jacob. Useful for system optimization but not blocking anything.**
+**Implement now. Unblocks FEAT-3. Required for system observability as projects expand.**
 
-Track: quality gate pass rate, cost per project/task type, which perspectives generate accepted tasks, overnight throughput. Add to dashboard/index.html or a separate page.
+### What to track (per task, stored in SQLite)
+
+Already in schema: `quality_score`, `cost_usd`, `actual_tokens`, `model_used`, `complexity`, `perspective`, `status`, `committed_at`
+
+New columns needed: `system_prompt TEXT`, `rejection_reason TEXT`, `quality_gate_skipped BOOL`
+
+### Metrics to compute
+
+| Metric | How |
+|---|---|
+| Quality gate pass rate | `pass / total` per project, per perspective, per complexity |
+| Cost per project/day/week | Sum `cost_usd` grouped by project + date |
+| Throughput | Committed tasks per night, per project |
+| Perspective acceptance | Tasks committed / tasks attempted per perspective |
+| Avg cost per task type | `cost_usd` grouped by `effort_category` |
+| Queue health | Queued / running / failed counts per project |
+
+### Discord #orchestrator-metrics channel
+
+New channel. Bot posts a metrics snapshot every 10 hours (configurable).
+
+```
+📊 Metrics Snapshot — 2026-06-06 08:00
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Quality gate:  87% pass (last 50 tasks)
+Throughput:    14 tasks committed last night
+Monthly spend: $3.21 / $65 (4.9%)
+
+By project:
+  lang     12 committed · $2.80 · 91% pass rate
+  meridian  2 committed · $0.41 · 80% pass rate
+
+Top perspectives this week:
+  speech_linguist    8 tasks · 100% accepted
+  engineering_arch   6 tasks ·  83% accepted
+  qa_tester          3 tasks ·  67% accepted
+
+Failed last night: 0
+Pending review:    0
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Dashboard: http://localhost:8080
+```
+
+### Files
+
+- `metrics.py` — compute all metrics from SQLite; `MetricsTracker` class
+- Update `task_queue.py` — add `system_prompt`, `rejection_reason`, `quality_gate_skipped` columns
+- Update `dashboard_generator.py` — add a Metrics tab to the Kanban dashboard
+- Update `orchestrator_main.py` — schedule metrics post every 10 hours
+- Update `notify.py` — add `metrics_snapshot(data)` formatter
+- Update `config.py` — add `DISCORD_CHANNEL_METRICS` env var
+
+### Dashboard tab
+
+Add a second tab to `dashboard/index.html`:
+- Quality gate pass rate chart (last 30 days)
+- Cost per project bar chart
+- Throughput per night line chart
+- Perspective leaderboard (acceptance rate + task count)
+
+### env vars
+
+```bash
+export DISCORD_CHANNEL_METRICS="..."   # new channel ID
+```
 
 Hold until system is stable and running consistently overnight.

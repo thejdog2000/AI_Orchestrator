@@ -31,7 +31,7 @@ import requests
 log = logging.getLogger(__name__)
 
 from config import (MINIMAX_API_BASE, MINIMAX_MODEL, OLLAMA_BASE,
-                    OLLAMA_MODEL_CODE, REPO_PATHS, TASKS_DIR)
+                    OLLAMA_MODEL_CODE, REPO_PATHS, TASKS_DIR, MINIMAX_SPEND_CAP, LOGS_DIR)
 
 BASE_DIR   = Path(__file__).parent
 REPO_PATH  = REPO_PATHS["lang"]
@@ -386,6 +386,13 @@ def run_nightly():
 
     if not os.environ.get("MINIMAX_API_KEY"):
         log.error("MINIMAX_API_KEY not set — skipping lang pipeline")
+        return
+
+    # Spend cap check before burning tokens on a full nightly run
+    from spend import SpendTracker
+    st = SpendTracker(LOGS_DIR / "spend.json", MINIMAX_SPEND_CAP)
+    if not st.check_caps():
+        log.error("[lang] Spend cap reached — skipping nightly run")
         return
 
     state        = _load_state()

@@ -3,6 +3,7 @@ dashboard_generator.py
 Generates dashboard/index.html from the SQLite task database.
 Called at each digest (morning / afternoon / evening).
 Open the output file directly in any browser — no server needed.
+Includes two tabs: Kanban (task board) and Metrics (FEAT-4).
 """
 
 import sqlite3
@@ -11,6 +12,18 @@ from datetime import datetime
 from pathlib import Path
 
 from task_queue import DB_PATH, PROJECT_COLORS, PERSPECTIVES, EFFORT_CATEGORIES
+
+
+def _load_metrics() -> dict:
+    """Load metrics data for the dashboard Metrics tab. Returns empty dict if DB missing."""
+    if not DB_PATH.exists():
+        return {}
+    try:
+        from task_queue import TaskQueue
+        tq = TaskQueue()
+        return tq.metrics_data(days=30)
+    except Exception:
+        return {}
 
 DASHBOARD_DIR = Path(__file__).parent / "dashboard"
 OUTPUT_PATH   = DASHBOARD_DIR / "index.html"
@@ -36,11 +49,13 @@ def _load_all_tasks() -> list[dict]:
 def generate() -> Path:
     DASHBOARD_DIR.mkdir(exist_ok=True)
     tasks       = _load_all_tasks()
+    metrics     = _load_metrics()
     projects    = sorted({t["project"] for t in tasks})
     generated   = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    tasks_json  = json.dumps(tasks, default=str)
-    colors_json = json.dumps(PROJECT_COLORS)
+    tasks_json   = json.dumps(tasks, default=str)
+    colors_json  = json.dumps(PROJECT_COLORS)
+    metrics_json = json.dumps(metrics, default=str)
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -135,6 +150,33 @@ def generate() -> Path:
   }}
   .completed-toggle:hover {{ color: var(--text); }}
   .hidden {{ display: none; }}
+
+  /* ── TABS ── */
+  .tabs {{ display: flex; gap: 0; border-bottom: 1px solid var(--border); padding: 0 20px; }}
+  .tab {{
+    padding: 8px 16px; font-size: 12px; font-weight: 500; cursor: pointer;
+    color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px;
+    transition: color .15s, border-color .15s;
+  }}
+  .tab:hover {{ color: var(--text); }}
+  .tab.active {{ color: var(--text); border-bottom-color: var(--blue); }}
+  .tab-content {{ display: none; }}
+  .tab-content.active {{ display: block; }}
+
+  /* ── METRICS ── */
+  .metrics-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; padding: 16px 20px; }}
+  .metric-card {{
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+  }}
+  .metric-title {{ font-size: 11px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); margin-bottom: 8px; }}
+  .metric-value {{ font-size: 28px; font-weight: 700; color: var(--text); }}
+  .metric-sub {{ font-size: 11px; color: var(--muted); margin-top: 4px; }}
+  .perspective-row {{ display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--border); }}
+  .perspective-row:last-child {{ border: none; }}
+  .persp-name {{ font-size: 11px; color: var(--text); flex: 1; }}
+  .persp-bar-wrap {{ width: 80px; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }}
+  .persp-bar {{ height: 100%; background: var(--blue); border-radius: 3px; }}
+  .persp-pct {{ font-size: 11px; color: var(--muted); width: 35px; text-align: right; }}
 </style>
 </head>
 <body>
@@ -145,6 +187,12 @@ def generate() -> Path:
   <div class="generated">Generated {generated}</div>
 </div>
 
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('kanban',this)">📋 Kanban</div>
+  <div class="tab" onclick="switchTab('metrics',this)">📊 Metrics</div>
+</div>
+
+<div id="tab-kanban" class="tab-content active">
 <div class="filters">
   <span class="filter-label">Project</span>
   <span class="pill active" data-filter="project" data-value="all" onclick="setFilter('project','all',this)">All</span>
@@ -162,10 +210,16 @@ def generate() -> Path:
 </div>
 
 <div class="board" id="board"></div>
+</div><!-- end tab-kanban -->
+
+<div id="tab-metrics" class="tab-content">
+  <div class="metrics-grid" id="metricsGrid"></div>
+</div>
 
 <script>
 const ALL_TASKS   = {tasks_json};
 const COLORS      = {colors_json};
+const METRICS     = {metrics_json};
 const COLUMNS     = [
   {{ key: 'queued',         label: 'Queued',                dot: '#94a3b8' }},
   {{ key: 'running',        label: 'Running',               dot: '#3b82f6' }},
@@ -261,6 +315,97 @@ function toggleCompleted() {{
   const toggle = body.previousElementSibling;
   const hidden = body.classList.toggle('hidden');
   toggle.textContent = hidden ? '▸ Show completed' : '▾ Hide completed';
+}}
+
+// ── TAB SWITCHING ────────────────────────────────────────────────────────────
+
+function switchTab(name, el) {{
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'metrics') renderMetrics();
+}}
+
+// ── METRICS RENDERING ────────────────────────────────────────────────────────
+
+function renderMetrics() {{
+  const grid = document.getElementById('metricsGrid');
+  if (!METRICS || Object.keys(METRICS).length === 0) {{
+    grid.innerHTML = '<div class="metric-card"><div class="metric-title">No data yet</div><div class="metric-sub">Run the orchestrator to collect metrics.</div></div>';
+    return;
+  }}
+
+  const qg         = METRICS.quality_gate || {{}};
+  const costByProj = METRICS.cost_by_project || {{}};
+  const throughput = METRICS.throughput_by_day || {{}};
+  const persp      = (METRICS.perspectives || []).sort((a,b) => b.attempted - a.attempted);
+  const failures   = METRICS.recent_failures || [];
+
+  // Throughput sparkline (last 14 days)
+  const tpDays = Object.entries(throughput).sort().slice(-14);
+  const tpMax  = Math.max(...tpDays.map(([,n]) => n), 1);
+  const spark  = tpDays.map(([d, n]) => {{
+    const h = Math.max(4, Math.round(n / tpMax * 40));
+    return `<span title="${{d}}: ${{n}} tasks" style="display:inline-block;width:10px;height:${{h}}px;background:var(--blue);border-radius:2px;vertical-align:bottom;margin:0 1px"></span>`;
+  }}).join('');
+
+  // Cost table
+  const costRows = Object.entries(costByProj)
+    .sort((a,b) => b[1].total - a[1].total)
+    .map(([proj, v]) => `<div class="perspective-row"><span class="persp-name">${{proj}}</span><span style="font-size:11px;color:var(--muted)">${{v.n}} tasks</span><span class="persp-pct">$${{v.total.toFixed(3)}}</span></div>`)
+    .join('') || '<div style="color:var(--muted);font-size:11px">No data yet</div>';
+
+  // Perspective bars
+  const perspMax = Math.max(...persp.map(p => p.attempted), 1);
+  const perspRows = persp.slice(0,10).map(p => {{
+    const w = Math.round(p.attempted / perspMax * 100);
+    const color = p.rate >= 80 ? 'var(--green)' : p.rate >= 50 ? 'var(--yellow)' : 'var(--red)';
+    return `<div class="perspective-row">
+      <span class="persp-name">${{p.name.replace(/_/g,' ')}}</span>
+      <div class="persp-bar-wrap"><div class="persp-bar" style="width:${{w}}%;background:${{color}}"></div></div>
+      <span class="persp-pct">${{p.rate.toFixed(0)}}%</span>
+    </div>`;
+  }}).join('') || '<div style="color:var(--muted);font-size:11px">No data yet</div>';
+
+  // Recent failures
+  const failRows = failures.slice(0,5).map(f =>
+    `<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--border)">
+      <span style="color:var(--red)">\`${{f.id}}\`</span>
+      <span style="color:var(--muted)"> [${{f.project}}] ${{(f.description||'').slice(0,55)}}…</span>
+    </div>`
+  ).join('') || '<div style="color:var(--muted);font-size:11px">No recent failures ✓</div>';
+
+  const gateColor = (qg.pass_rate||0) >= 80 ? 'var(--green)' : (qg.pass_rate||0) >= 60 ? 'var(--yellow)' : 'var(--red)';
+
+  grid.innerHTML = `
+    <div class="metric-card">
+      <div class="metric-title">Quality Gate Pass Rate</div>
+      <div class="metric-value" style="color:${{gateColor}}">${{(qg.pass_rate||0).toFixed(1)}}%</div>
+      <div class="metric-sub">${{qg.passed||0}} passed / ${{qg.total||0}} total (last 30d)</div>
+    </div>
+
+    <div class="metric-card">
+      <div class="metric-title">Nightly Throughput</div>
+      <div style="padding:8px 0">${{spark || '<span style="color:var(--muted);font-size:11px">No data yet</span>'}}</div>
+      <div class="metric-sub">Tasks committed per night (last 14 days)</div>
+    </div>
+
+    <div class="metric-card">
+      <div class="metric-title">Cost by Project (last 30d)</div>
+      ${{costRows}}
+    </div>
+
+    <div class="metric-card">
+      <div class="metric-title">Perspective Acceptance Rate</div>
+      ${{perspRows}}
+    </div>
+
+    <div class="metric-card">
+      <div class="metric-title">Recent Failures</div>
+      ${{failRows}}
+    </div>
+  `;
 }}
 
 render();

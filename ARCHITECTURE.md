@@ -114,23 +114,32 @@ git_watcher.py         Cowork session commits: polls COMMIT_REQUEST.txt, clears 
 notify.py              Unified Discord REST poster: post(channel, msg, embed)
                          Called by executor.py + orchestrator_main.py on all task events.
                          Works without the bot process running (direct REST, bot token).
-orchestrator_bot.py    discord.py bot process — listens in #chat, parses intent via Ollama,
-                         dispatches approve/reject/status/query commands. Run separately:
-                         `python orchestrator_bot.py`
 dashboard_server.py    http.server wrapper — serves dashboard/index.html on :8080.
                          Auto-started by orchestrator_main in a background thread.
                          Also runnable standalone: `python dashboard_server.py`
-o.py                   CLI alias — same intent parsing as #chat, usable from terminal.
-                         Setup: alias o="python3 ~/projects/Orchestrator/o.py"
-                         Usage: o status | o "approve all lang" | o help
 
-── Planned ────────────────────────────────────────────────────────
+── agents/ (agent scripts + personas) ─────────────────────────────
+agents/orchestrator_bot.py  discord.py bot — listens in #chat, parses intent via Ollama,
+                         dispatches approve/reject/status/query commands.
+                         Run: python agents/orchestrator_bot.py
+agents/o.py            CLI alias — same intent parsing as #chat.
+                         Setup: alias o="python3 ~/projects/Orchestrator/agents/o.py"
+                         Usage: o status | o "approve all lang" | o help
+agents/personas/domain/  15 domain expert personas injected into council calls
+agents/personas/review/  4 reviewer personas for product/doc reviews
+
+── Metrics (FEAT-4) ────────────────────────────────────────────────
+metrics.py             Computes quality gate pass rate, cost/project, throughput,
+                         perspective acceptance rates. Posts to #orchestrator-metrics
+                         every 10 hours (METRICS_INTERVAL_HOURS env var).
+                         Usage: python metrics.py [--discord] [--days N]
+                         Dashboard: metrics tab added to dashboard/index.html.
+
+── Utilities ───────────────────────────────────────────────────────
 validate.py            Pre-flight checklist: run before first overnight session.
-                         Checks Ollama, models, env vars, repos, DB, git_watcher,
-                         Discord API. Shows fix commands with --fix flag.
+                         Checks Ollama, models, env vars (incl. DISCORD_CHANNEL_METRICS),
+                         repos, DB, git_watcher, Discord API.
                          Usage: python validate.py [--fix]
-personas/domain/       TODO: domain expert persona files (see BACKLOG.md FEAT-1)
-personas/review/       TODO: reader persona files (see BACKLOG.md FEAT-1)
 ```
 
 ## Council Prompting Design

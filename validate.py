@@ -94,11 +94,14 @@ def check_env_vars():
          "export DISCORD_CHANNEL_BLOCKED='...'"),
         ("DISCORD_CHANNEL_CHAT",  "#orchestrator-chat channel ID",
          "export DISCORD_CHANNEL_CHAT='...'"),
+        ("DISCORD_CHANNEL_METRICS", "#orchestrator-metrics channel ID (FEAT-4)",
+         "export DISCORD_CHANNEL_METRICS='...'"),
     ]
     vars_optional = [
-        ("DISCORD_USER_ID", "Discord user ID (for DMs)"),
-        ("NTFY_TOPIC",      "ntfy.sh push topic (fallback channel)"),
-        ("NOTIFY_EMAIL",    "notification email address (fallback channel)"),
+        ("DISCORD_USER_ID",        "Discord user ID — STRONGLY RECOMMENDED for bot auth"),
+        ("NTFY_TOPIC",             "ntfy.sh push topic (fallback channel)"),
+        ("NOTIFY_EMAIL",           "notification email address (fallback channel)"),
+        ("METRICS_INTERVAL_HOURS", "metrics post interval in hours (default: 10)"),
     ]
     for var, label, fix in vars_required:
         check(f"{var} set ({label})", bool(os.environ.get(var)), fix=fix)

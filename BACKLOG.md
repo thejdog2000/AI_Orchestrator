@@ -181,7 +181,7 @@ Requires: `pip install ghp-import` + GitHub Pages enabled on repo settings.
 
 ---
 
-## 🔴 FEAT-AutoCommit: Remove pending_review, Auto-Commit Normal Tasks
+## ✅ FEAT-AutoCommit: Remove pending_review, Auto-Commit Normal Tasks *(implemented 2026-06-06)*
 
 **Removes the biggest daily friction point. 90-95% of tasks commit without Jacob's involvement.**
 

@@ -44,16 +44,20 @@ LAYER 3 — APPROVAL (Jacob, ~10 min/day)
 1. Scheduler fires (every 2 min, BackgroundScheduler)
 2. Per-project lock check — skip busy projects
 3. Get next task from SQLite queue (unblocked, not approval_required)
-4. git checkout -- . (clean working tree)
-5. Ollama writes execution prompt from task + CONTEXT.md
-6. MiniMax generates files in <<<FILE: path>>> blocks
-7. Path traversal guard: dest.resolve().is_relative_to(repo_path.resolve())
-8. Write files to repo
-9. Quality gate: Ollama evaluates diff (fails CLOSED on parse error)
-10. Auto-commit: git add -A + git commit (no pending_review accumulation)
-11. CONTEXT.md updated: Ollama reads diff → updates project state
-12. Discord notification: "Task X committed in [project]"
-13. If approval_required: pause, Discord DM to Jacob, wait
+4. notify.task_started() → #orchestrator-live
+5. git checkout -- . (clean working tree)
+6. Ollama writes execution prompt from task + CONTEXT.md
+7. MiniMax generates files in <<<FILE: path>>> blocks
+8. Path traversal guard: dest.resolve().is_relative_to(repo_path.resolve())
+9. Write files to repo
+10. Quality gate: Ollama evaluates diff (fails CLOSED on parse error)
+    └─ fail → notify.quality_gate_failed() → #live + #blocked embed; return
+11. Record spend. Check milestones (50/75/85/100%) → notify.spend_milestone()
+12. CONTEXT.md updated: Ollama reads diff → updates project state
+13a. approval_required=False → auto-commit (git add -A + git commit)
+     └─ notify.task_committed() → #live with commit hash + cost
+13b. approval_required=True  → mark_pending_review
+     └─ notify.task_pending_review() → #live + #blocked embed for Jacob
 14. If queue < threshold: MiniMax council generates new tasks
 ```
 

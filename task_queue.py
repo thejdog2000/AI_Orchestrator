@@ -90,6 +90,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at       TEXT,
     started_at       TEXT,
     completed_at     TEXT,
+    committed_at     TEXT,
+    commit_hash      TEXT    DEFAULT '',
     notes            TEXT    DEFAULT ''
 );
 
@@ -184,7 +186,8 @@ class TaskQueue:
     def update_status(self, task_id: str, status: str, **kwargs):
         """Update task status and any additional fields passed as kwargs."""
         allowed = {
-            "started_at", "completed_at", "diff_path", "aider_prompt",
+            "started_at", "completed_at", "committed_at", "commit_hash",
+            "diff_path", "aider_prompt",
             "actual_tokens", "cost_usd", "model_used", "quality_score", "notes"
         }
         fields = {k: v for k, v in kwargs.items() if k in allowed}
@@ -210,6 +213,19 @@ class TaskQueue:
     def mark_completed(self, task: dict, **kwargs):
         self.update_status(task["id"], "completed",
                            completed_at=datetime.now().isoformat(), **kwargs)
+
+    def mark_committed(self, task: dict, commit_hash: str = "", diff_path: str = "", **kwargs):
+        """Mark a task as committed (auto-commit flow). Sets status=completed."""
+        now = datetime.now().isoformat()
+        self.update_status(
+            task["id"], "completed",
+            completed_at=now,
+            committed_at=now,
+            commit_hash=commit_hash,
+            diff_path=diff_path,
+            **kwargs,
+        )
+        log.info(f"[{task['project']}] {task['id']} → committed ({commit_hash or 'no hash'})")
 
     def mark_failed(self, task: dict, notes: str = ""):
         self.update_status(task["id"], "failed",

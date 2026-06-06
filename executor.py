@@ -356,6 +356,51 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
     }
 
 
+# ── AUTO-COMMIT ───────────────────────────────────────────────────────────────
+
+def _auto_commit(task: dict, repo_path: Path) -> str:
+    """
+    Auto-commit staged changes for a task that passed the quality gate.
+    Commit message format: [orchestrator] {project}: {description[:60]} ({perspective})
+
+    Returns the short commit hash, or "" if commit failed.
+    This replaces the pending_review accumulation flow for non-approval_required tasks.
+    approval_required=True tasks still go to mark_pending_review for Jacob to approve.
+    """
+    if not repo_path or not repo_path.exists():
+        log.error(f"[{task['project']}] Auto-commit skipped — repo_path invalid: {repo_path}")
+        return ""
+
+    project     = task["project"]
+    description = task.get("description", "")[:60]
+    perspective = task.get("perspective", "")
+    msg         = f"[orchestrator] {project}: {description} ({perspective})"
+
+    try:
+        subprocess.run(["git", "add", "-A"], cwd=repo_path, capture_output=True, check=True)
+        result = subprocess.run(
+            ["git", "commit", "-m", msg],
+            cwd=repo_path, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            if "nothing to commit" in result.stdout + result.stderr:
+                log.warning(f"[{project}] Auto-commit: nothing to commit for {task['id']}")
+                return ""
+            log.error(f"[{project}] Auto-commit failed: {result.stderr.strip()}")
+            return ""
+
+        # Get short commit hash
+        rev = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=repo_path, capture_output=True, text=True,
+        )
+        return rev.stdout.strip() if rev.returncode == 0 else ""
+
+    except Exception as e:
+        log.error(f"[{project}] Auto-commit exception: {e}")
+        return ""
+
+
 # ── RUN TASK (with retries + feedback) ───────────────────────────────────────
 
 def run_task(task: dict, spend_tracker, task_queue):
@@ -451,9 +496,26 @@ def run_task(task: dict, spend_tracker, task_queue):
     if result.get("diff_text") and repo_path:
         update_context_md(task, result["diff_text"], repo_path)
 
-    # Queue diff for Jacob review + notify #live and #blocked
-    task_queue.mark_pending_review(task, result["diff_path"])
-    _notify().task_pending_review(task)
+    # ── AUTO-COMMIT or APPROVAL QUEUE ────────────────────────────────────────
+    if task.get("approval_required"):
+        # Send to pending_review — Jacob must approve before commit
+        task_queue.mark_pending_review(task, result["diff_path"])
+        log.info(f"[{project}] {task['id']} → pending_review (approval_required)")
+        _notify().task_pending_review(task)
+    else:
+        # Auto-commit: git add -A + git commit
+        commit_hash = _auto_commit(task, repo_path)
+        task_queue.mark_committed(
+            task,
+            commit_hash=commit_hash,
+            diff_path=str(result["diff_path"]),
+            actual_tokens=result.get("output_tokens", 0),
+            cost_usd=cost,
+            model_used=_cfg("MINIMAX_MODEL"),
+        )
+        result["commit_hash"] = commit_hash
+        _notify().task_committed(task, result, monthly, cap)
+        log.info(f"[{project}] {task['id']} auto-committed ({commit_hash})")
 
     # Refill task queue if running low
     if task_queue.total_unblocked(projects=enabled_projects) < refill_threshold:

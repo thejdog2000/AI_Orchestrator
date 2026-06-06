@@ -167,11 +167,11 @@ def generate() -> Path:
 const ALL_TASKS   = {tasks_json};
 const COLORS      = {colors_json};
 const COLUMNS     = [
-  {{ key: 'queued',         label: 'Queued',         dot: '#94a3b8' }},
-  {{ key: 'running',        label: 'Running',         dot: '#3b82f6' }},
-  {{ key: 'pending_review', label: 'Pending Review',  dot: '#f59e0b' }},
-  {{ key: 'completed',      label: 'Completed',       dot: '#10b981' }},
-  {{ key: 'failed',         label: 'Failed',          dot: '#ef4444' }},
+  {{ key: 'queued',         label: 'Queued',                dot: '#94a3b8' }},
+  {{ key: 'running',        label: 'Running',               dot: '#3b82f6' }},
+  {{ key: 'pending_review', label: 'Needs Approval',        dot: '#f59e0b' }},
+  {{ key: 'completed',      label: 'Committed / Completed', dot: '#10b981' }},
+  {{ key: 'failed',         label: 'Failed',                dot: '#ef4444' }},
 ];
 
 const filters = {{ project: 'all', perspective: 'all', complexity: 'all' }};

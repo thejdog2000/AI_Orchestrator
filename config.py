@@ -82,6 +82,22 @@ SPRINT_GOALS = {
     "tax":      "Azure AVD + PowerShell scripts ready for tax practice demo",
 }
 
+# ── DISCORD ───────────────────────────────────────────────────────────────────
+# Set these env vars before running the bot:
+#   export DISCORD_BOT_TOKEN="..."
+#   export DISCORD_CHANNEL_LIVE="..."      # #orchestrator-live channel ID
+#   export DISCORD_CHANNEL_BLOCKED="..."   # #orchestrator-blocked channel ID
+#   export DISCORD_CHANNEL_CHAT="..."      # #orchestrator-chat channel ID
+#   export DISCORD_USER_ID="..."           # Jacob's user ID (for DMs on critical events)
+#   export DASHBOARD_PORT="8080"           # local dashboard port (default 8080)
+#
+# Channel IDs: right-click channel in Discord → "Copy Channel ID" (needs Dev Mode on)
+# Bot token: discord.com/developers/applications → your app → Bot → Token
+#
+# Never hardcode tokens here — env vars only.
+
+DASHBOARD_PORT = int(__import__("os").environ.get("DASHBOARD_PORT", "8080"))
+
 # ── SHARED CFG DICT (passed to executor.configure, digests.configure) ─────────
 
 CFG = {
@@ -104,4 +120,5 @@ CFG = {
     "OLLAMA_BASE":            OLLAMA_BASE,
     "OLLAMA_MODEL_CODE":      OLLAMA_MODEL_CODE,
     "OLLAMA_MODEL_DIGEST":    OLLAMA_MODEL_DIGEST,
+    "DASHBOARD_PORT":         DASHBOARD_PORT,
 }

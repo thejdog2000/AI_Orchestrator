@@ -95,18 +95,32 @@ No `pending_review/` accumulation. Auto-committed tasks appear in git log and Di
 
 ```
 config.py              Single source of truth — edit to change anything
-orchestrator_main.py   Entry point: scheduler, PID lock, health checks, Discord import
+orchestrator_main.py   Entry point: scheduler, PID lock, health checks, dashboard server start
 executor.py            MiniMax calls, Ollama prompts, path guard, CONTEXT.md loop, retries
 spend.py               SpendTracker with atomic writes (tmp + os.replace)
 digests.py             Digest generation (qwen3:14b)
 task_queue.py          SQLite TaskQueue, PERSPECTIVE_PROJECT_MAP, gap-fill
 task_generator.py      Council pipeline: perspective calls → merge → JSON insert
 lang_pipeline.py       7-night scene schedule, schema-aware prompts, Node smoke tests
-dashboard_generator.py Static Kanban HTML — no server needed
-approve.py             CLI for approval_required tasks only
-git_watcher.py         Auto-commit daemon: polls COMMIT_REQUEST.txt, clears locks
-orchestrator_bot.py    TODO: Discord bot PA interface (see BACKLOG.md FEAT-Discord)
-notify.py              TODO: multi-channel push notifications (see BACKLOG.md FEAT-Discord)
+dashboard_generator.py Static Kanban HTML — regenerated on each dashboard_server request
+approve.py             CLI for approval_required tasks only (most tasks auto-commit)
+git_watcher.py         Cowork session commits: polls COMMIT_REQUEST.txt, clears locks
+
+── Discord (FEAT-Discord — implemented) ───────────────────────────
+notify.py              Unified Discord REST poster: post(channel, msg, embed)
+                         Called by executor.py + orchestrator_main.py on all task events.
+                         Works without the bot process running (direct REST, bot token).
+orchestrator_bot.py    discord.py bot process — listens in #chat, parses intent via Ollama,
+                         dispatches approve/reject/status/query commands. Run separately:
+                         `python orchestrator_bot.py`
+dashboard_server.py    http.server wrapper — serves dashboard/index.html on :8080.
+                         Auto-started by orchestrator_main in a background thread.
+                         Also runnable standalone: `python dashboard_server.py`
+o.py                   CLI alias — same intent parsing as #chat, usable from terminal.
+                         Setup: alias o="python3 ~/projects/Orchestrator/o.py"
+                         Usage: o status | o "approve all lang" | o help
+
+── Planned ────────────────────────────────────────────────────────
 validate.py            TODO: pre-flight checklist (see BACKLOG.md)
 personas/domain/       TODO: domain expert persona files (see BACKLOG.md FEAT-1)
 personas/review/       TODO: reader persona files (see BACKLOG.md FEAT-1)

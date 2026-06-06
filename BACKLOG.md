@@ -5,53 +5,179 @@ Priority: 🔴 highest | 🟠 high | 🟡 medium | ⚪ low
 
 ---
 
-## 🔴 FEAT-Discord: Discord Bot PA Interface
+## ✅ FEAT-Discord: Discord Bot — Three-Channel PA Interface *(implemented 2026-06-06)*
+
+**Implemented.** Files: `notify.py`, `orchestrator_bot.py`, `dashboard_server.py`, `o.py`.
+See ARCHITECTURE.md Module Map for setup and usage details.
+
+---
 
 **The orchestrator's primary interface. Replaces polling, Python scripts, and manual approve.py runs.**
+**Three dedicated channels, three distinct jobs.**
 
-Jacob messages the bot in `#orchestrator`. The bot responds and executes. The bot also proactively posts when it needs Jacob.
+---
 
-**Push (orchestrator → Jacob):**
-- `approval_required` task blocked — DM with task description + `approve <id>` command
-- Morning digest at 8am — what committed overnight, spend, what's queued
-- Spend ≥ 85% cap — warning with current/cap figures
-- 3+ consecutive API errors — possible key issue or outage
-- (Rate limited: max 1 push per trigger type per hour)
+### Channel 1: `#orchestrator-live`
+**Real-time task feed. Jacob can see exactly what the orchestrator is doing at any moment.**
 
-**Pull (Jacob → bot):**
-Natural language routed through Ollama → action:
-- "what happened overnight" / "morning summary" → digest
-- "what's running right now" → queue status per project
-- "approve everything" / "approve lang tasks" → runs approve.py logic
-- "reject <task_id>" / "reject that last one" → mark failed, log reason
-- "pause lang" / "stop overnight" → sets project to paused in DB
-- "resume lang" / "start again" → unpauses
-- "what's queued for tonight" → tonight's lang schedule + pending tasks
-- "how much have we spent" → spend tracker summary
-- "what did we build this week" → committed log summary
-- "change meridian to polish phase" → updates config.py SPRINT_PHASES
+Every task event posts a short message automatically:
 
-**Implementation:**
-- `orchestrator_bot.py` — discord.py bot, listens in `#orchestrator`
-- Ollama (qwen3:14b) for intent parsing — lightweight, fast, free
-- Intent → function map (approve, reject, status, pause, resume, etc.)
-- All actions write to same DB/config as orchestrator_main.py
-- `notify.py` — unified send() used by both bot pushes and orchestrator events
+```
+⚙️  [lang] Starting: generate izakaya A0 scene  (speech_linguist · medium)
 
-**Environment vars:**
-```bash
-export DISCORD_BOT_TOKEN="..."
-export DISCORD_CHANNEL_ID="..."   # #orchestrator channel ID
-export DISCORD_USER_ID="..."      # Jacob's user ID for DMs
+✅  [lang] Committed: scenes/ja/izakaya_01.js
+    482 tokens · $0.0006 · monthly: $1.24 / $65
+    commit: a3f91bc
+
+❌  [lang] Failed after 3 attempts: generate izakaya A0 scene
+    error: api_http_429 — rate limit
+    next: retrying in 15 min
+
+⏸  [meridian] Paused — approval required
+    → see #orchestrator-blocked
 ```
 
-**`o` CLI alias** — thin 20-line wrapper sending to the same bot backend:
+Events posted to `#live`:
+- Task started (with project, description truncated, perspective, complexity)
+- Task committed (with file count, tokens, cost, commit hash)
+- Task failed (with error, retry plan)
+- Quality gate failed (routed to blocked)
+- Spend milestone reached (50%, 75%, 85%, 100% of cap)
+- Overnight run started / completed (summary: N tasks, $X.XX)
+
+Rate: one message per event, no batching. This channel is the live view.
+
+---
+
+### Channel 2: `#orchestrator-blocked`
+**Actionable items only. Nothing posts here unless Jacob needs to do something.**
+
+Posts a rich embed when a task is blocked on approval or fails repeatedly:
+
+```
+🔴 APPROVAL REQUIRED
+━━━━━━━━━━━━━━━━━━━━
+Project:      meridian
+Task:         Implement JWT auth endpoint for React Native login
+Perspective:  security_engineer
+Complexity:   high  ·  review_priority: 5/5
+Blocked since: 2 hours ago
+
+Why blocked: approval_required=True — JWT auth touches auth flow
+Action needed: approve or reject
+
+✅ approve meridian_jwt_001   ❌ reject meridian_jwt_001
+
+🔗 Dashboard: http://localhost:8080
+```
+
+Each blocked embed includes:
+- Color-coded by urgency (red = approval required, orange = repeated failure)
+- Full task description
+- Project + perspective + complexity + review_priority
+- How long it's been blocked
+- Exact approve/reject command to paste into `#chat`
+- Link to local Kanban dashboard (works when at home; embed has full context for mobile)
+
+Posts to `#blocked` when:
+- `approval_required=True` task reaches queue front
+- Task fails quality gate after all retries
+- Project has been idle/blocked for >2 hours during overnight run
+
+**Dashboard link:** Bot serves `dashboard/index.html` via local HTTP on port 8080.
+Link works on local network. Discord embed contains full context so it's readable on mobile without clicking.
+
+Optional enhancement (see BACKLOG): auto-publish dashboard to GitHub Pages for remote access.
+
+---
+
+### Channel 3: `#orchestrator-chat`
+**Natural language interface. Message the bot to direct, query, or get summaries.**
+
+Bot listens exclusively in this channel. Ollama (qwen3:14b) parses intent → action.
+
+Supported natural language commands:
+```
+"what happened overnight"          → morning digest summary
+"what's running right now"         → live queue status per project
+"what did we build this week"      → committed log summary by project
+"how much have we spent"           → spend tracker with daily/monthly breakdown
+"what's queued for tonight"        → lang schedule + pending task count per project
+"show me blocked items"            → list everything in approval queue
+
+"approve meridian_jwt_001"         → approve specific task
+"approve all lang tasks"           → bulk approve all lang pending
+"reject meridian_jwt_001"          → reject, mark failed, remove from blocked
+"approve everything"               → bulk approve all pending (asks confirmation first)
+
+"pause lang"                       → stop lang from running overnight
+"resume lang"                      → unpause
+"pause everything"                 → halt all projects (spend concern, debugging)
+
+"change meridian to polish phase"  → updates SPRINT_PHASES in config.py
+"what phase is rts in"             → reads current sprint phase + goal
+"prioritize lang tonight"          → moves lang tasks to priority 0
+
+"what decisions did the council make this week"  → summary from task rationale field
+"why did it build X"               → reads task rationale + perspective from DB
+```
+
+Bot also accepts direct task IDs without natural language:
+```
+approve meridian_jwt_001
+reject lang_003
+status lang
+```
+
+---
+
+### Implementation Plan *(completed — see below for first-run setup)*
+
+**First-run setup:**
 ```bash
-o "what happened overnight"   # same as messaging Discord bot
+# 1. Install discord.py
+pip install discord.py
+
+# 2. Set env vars (add to ~/.zshrc or equivalent)
+export DISCORD_BOT_TOKEN="..."          # Bot → Token in Discord Developer Portal
+export DISCORD_CHANNEL_LIVE="..."       # Right-click #orchestrator-live → Copy Channel ID
+export DISCORD_CHANNEL_BLOCKED="..."    # Right-click #orchestrator-blocked → Copy Channel ID
+export DISCORD_CHANNEL_CHAT="..."       # Right-click #orchestrator-chat → Copy Channel ID
+export DISCORD_USER_ID="..."            # Your user ID (Settings → Advanced → Dev Mode → copy)
+export DASHBOARD_PORT=8080
+
+# 3. Start the bot (separate terminal from orchestrator_main.py)
+python orchestrator_bot.py
+
+# 4. CLI alias (add to ~/.zshrc)
+alias o="python3 ~/projects/Orchestrator/o.py"
+```
+
+**Files:**
+- `orchestrator_bot.py` — discord.py bot process, separate from orchestrator_main.py
+- `notify.py` — unified `post(channel, message, embed=None)` called by both bot and executor
+- `dashboard_server.py` — simple `http.server` wrapper, serves `dashboard/` on port 8080
+
+**Integration points:**
+- `executor.py` → calls `notify.post("live", ...)` on task start/commit/fail
+- `orchestrator_main.py` → calls `notify.post("live", ...)` on overnight start/end, spend warnings
+- `orchestrator_bot.py` → calls `notify.post("blocked", embed)` on approval_required events
+- Intent parsing: Ollama qwen3:14b with structured intent JSON (`{"action": "approve", "target": "all lang"}`)
+
+**`o` CLI alias** — same backend as `#chat`, for terminal use:
+```bash
+o "what happened overnight"
 o "approve all lang"
 o status
 ```
 Add to `~/.zshrc`: `alias o="python3 ~/projects/Orchestrator/o.py"`
+
+---
+
+### GitHub Pages Enhancement (optional, after bot is working)
+Auto-publish `dashboard/index.html` to `gh-pages` branch on each digest update.
+Dashboard accessible from phone anywhere: `https://thejdog2000.github.io/AI_Orchestrator/`
+Requires: `pip install ghp-import` + GitHub Pages enabled on repo settings.
 
 ---
 

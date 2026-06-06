@@ -39,31 +39,42 @@ qwen3:14b         — digest prose, CONTEXT.md updates (lighter/faster)
 
 ## Interface — How Jacob Interacts
 
-**Discord** (`#orchestrator` channel) — primary PA interface
-- Orchestrator pushes to Jacob: morning digest, approval needed, spend warnings
-- Jacob messages bot: "what happened overnight", "approve the RTS tasks", "pause lang"
-- Natural language → Ollama → action
+**Discord — three channels:**
+
+| Channel | Purpose |
+|---|---|
+| `#orchestrator-live` | Real-time feed: every task started, committed, failed |
+| `#orchestrator-blocked` | Approval queue: rich embeds with task context + dashboard link |
+| `#orchestrator-chat` | Natural language: ask questions, approve/reject, redirect |
+
+The bot posts to `#live` automatically on every task event.
+`#blocked` only posts when Jacob needs to act — approval required or repeated failure.
+`#chat` is Jacob's entry point: "what happened overnight", "approve all lang", "pause rts".
 
 **Cowork (Claude)** — deep-work sessions
 - Sprint planning, architecture reviews, feature building, complex diffs
 - This is where you are now
 
-**`o` CLI alias** — thin wrapper, same Discord backend, for terminal use
+**`o` CLI alias** — same `#chat` backend, for terminal: `o "what's queued for tonight"`
 
 ## Daily Rhythm
 
-**Triggered (no schedule — Discord pushes to Jacob):**
-- `approval_required=True` task blocked → Discord DM
-- Spend ≥ 85% cap → Discord DM
-- Morning digest → Discord at 8am
+**Triggered automatically (Discord pushes, no polling needed):**
+- Every task start/commit/fail → `#live` in real-time
+- `approval_required` task blocked → `#blocked` embed with full context
+- Spend ≥ 85% cap → `#blocked` warning embed
+- Morning digest at 8am → `#blocked` summary
 
-**Morning (~10 min):**
-- Read Discord digest
-- If approval needed: message bot "approve <task_id>" or `python approve.py`
+**Morning (~5-10 min):**
+- Glance at `#live` — overnight activity at a glance
+- Check `#blocked` — anything needing approval?
+- If yes: type in `#chat`: "approve meridian_jwt_001" or "approve all lang"
 - Nothing else unless something looks wrong
 
 **Anytime:**
-- Message Discord bot or open Cowork to redirect, get status, review decisions
+- `#chat` for questions, direction changes, status
+- `#live` to see what's running right now
+- Cowork (here) for deep work or building new features
 
 ## Approval Model
 

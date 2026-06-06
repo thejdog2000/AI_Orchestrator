@@ -27,9 +27,11 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 import executor
 import digests
+import notify
 from config      import (CFG, BASE_DIR, TASKS_DIR, PENDING_DIR, APPROVED_DIR,
                           LOGS_DIR, BACKUPS_DIR, DASHBOARD_DIR, PID_FILE, DB_PATH,
-                          PROJECTS, ENABLED_PROJECTS, MINIMAX_SPEND_CAP, REPO_PATHS)
+                          PROJECTS, ENABLED_PROJECTS, MINIMAX_SPEND_CAP, REPO_PATHS,
+                          DASHBOARD_PORT)
 from spend       import SpendTracker
 from task_queue  import TaskQueue
 from dashboard_generator import generate as generate_dashboard
@@ -202,8 +204,20 @@ scheduler.add_job(
     lambda: digests.write_digest("evening",   task_queue, spend_tracker),
     "cron", hour=20, minute=0, id="evening_digest",
 )
-scheduler.add_job(backup_db,         "cron", hour=3,  minute=0,  id="db_backup")
-scheduler.add_job(run_lang_nightly,  "cron", hour=22, minute=0,  id="lang_nightly")
+scheduler.add_job(backup_db, "cron", hour=3, minute=0, id="db_backup")
+
+
+def _run_lang_nightly_with_notify():
+    """Wrap lang nightly run with Discord start/end notifications."""
+    notify.overnight_started(ENABLED_PROJECTS)
+    tasks_before = task_queue.stats().get("completed", 0)
+    run_lang_nightly()
+    tasks_after  = task_queue.stats().get("completed", 0)
+    n_completed  = max(0, tasks_after - tasks_before)
+    notify.overnight_completed(n_completed, spend_tracker.monthly_spend())
+
+
+scheduler.add_job(_run_lang_nightly_with_notify, "cron", hour=22, minute=0, id="lang_nightly")
 
 # ── ENTRY POINT ───────────────────────────────────────────────────────────────
 
@@ -219,6 +233,13 @@ if __name__ == "__main__":
     if not executor.check_ollama():
         log.warning("Ollama unavailable — execution prompts will fall back to raw task descriptions")
 
+    # Start dashboard server in background thread
+    from dashboard_server import start_background as start_dashboard
+    start_dashboard(port=DASHBOARD_PORT)
+
+    # Notify Discord that the orchestrator is online
+    notify.orchestrator_started(ENABLED_PROJECTS, spend_tracker.monthly_spend(), MINIMAX_SPEND_CAP)
+
     if task_queue.total_unblocked(projects=ENABLED_PROJECTS) == 0:
         _seed_sample_tasks()
 
@@ -233,4 +254,5 @@ if __name__ == "__main__":
         log.info("Stopping...")
         scheduler.shutdown(wait=False)
         _remove_pid()
+        notify.orchestrator_stopped()
         log.info("Stopped.")

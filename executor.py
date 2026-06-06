@@ -16,6 +16,12 @@ import requests
 
 log = logging.getLogger(__name__)
 
+# notify is imported lazily to avoid circular-import risk at startup.
+# Use _notify() wherever you need it.
+def _notify():
+    import notify as _n
+    return _n
+
 # Imported by orchestrator_main — set there, referenced here via module-level vars
 # Injected at init time via configure()
 _config: dict = {}
@@ -369,6 +375,9 @@ def run_task(task: dict, spend_tracker, task_queue):
     evaluation = {}
     context_md = load_context(project, _cfg("REPO_PATHS"))
 
+    # Notify Discord that this task is starting
+    _notify().task_started(task)
+
     for attempt in range(max_retries):
         # Clean working tree before every attempt
         if repo_path and repo_path.exists():
@@ -397,10 +406,12 @@ def run_task(task: dict, spend_tracker, task_queue):
 
     # All attempts exhausted
     if not result or not result["success"]:
+        error = str(result.get("error", "unknown")) if result else "no_result"
         log.error(f"[{project}] {task['id']} failed after {max_retries} attempts")
         fail_path = pending_dir / f"FAILED_{project}_{task['id']}.json"
         fail_path.write_text(json.dumps({"task": task, "result": result}, indent=2))
-        task_queue.mark_failed(task, notes=str(result.get("error", "unknown")))
+        task_queue.mark_failed(task, notes=error)
+        _notify().task_failed(task, error, max_retries)
         return
 
     # Quality gate
@@ -408,10 +419,12 @@ def run_task(task: dict, spend_tracker, task_queue):
     log.info(f"[{project}] Quality gate: score={evaluation.get('score')} pass={evaluation.get('pass')}")
 
     if not evaluation.get("pass", True):
+        reasoning = evaluation.get("reasoning", "")
         log.warning(f"[{project}] Quality gate failed — flagging {task['id']} for review")
         fail_path = pending_dir / f"QUALITY_FAILED_{project}_{task['id']}.json"
         fail_path.write_text(json.dumps({"task": task, "evaluation": evaluation}, indent=2))
-        task_queue.mark_failed(task, notes=f"quality: {evaluation.get('reasoning','')}")
+        task_queue.mark_failed(task, notes=f"quality: {reasoning}")
+        _notify().quality_gate_failed(task, reasoning)
         return
 
     # Record spend
@@ -421,14 +434,26 @@ def run_task(task: dict, spend_tracker, task_queue):
         result.get("output_tokens", 0),
         _cfg("MINIMAX_MODEL"),
     )
-    log.info(f"[{project}] Done. Cost ${cost:.4f} | Monthly ${spend_tracker.monthly_spend():.2f}")
+    monthly = spend_tracker.monthly_spend()
+    cap     = _cfg("MINIMAX_SPEND_CAP")
+    log.info(f"[{project}] Done. Cost ${cost:.4f} | Monthly ${monthly:.2f}")
+
+    # Spend milestone notifications (50 / 75 / 85 / 100 %)
+    pct = monthly / cap * 100
+    _prev_monthly = monthly - cost
+    _prev_pct     = _prev_monthly / cap * 100
+    for milestone in (50, 75, 85, 100):
+        if _prev_pct < milestone <= pct:
+            _notify().spend_milestone(monthly, cap)
+            break
 
     # Update CONTEXT.md — closes the feedback loop
     if result.get("diff_text") and repo_path:
         update_context_md(task, result["diff_text"], repo_path)
 
-    # Queue diff for Jacob review
+    # Queue diff for Jacob review + notify #live and #blocked
     task_queue.mark_pending_review(task, result["diff_path"])
+    _notify().task_pending_review(task)
 
     # Refill task queue if running low
     if task_queue.total_unblocked(projects=enabled_projects) < refill_threshold:

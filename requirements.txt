@@ -1,0 +1,13 @@
+# Orchestrator — Python dependencies
+# Install: pip install -r requirements.txt
+#
+# Python 3.10+ required (uses match/case and X | Y union type hints)
+
+# Scheduler (task execution loop every 2 min, digest cron jobs)
+apscheduler>=3.10.0
+
+# HTTP — MiniMax API, Ollama API, Discord REST, ntfy.sh fallback
+requests>=2.31.0
+
+# Discord bot (orchestrator_bot.py)
+discord.py>=2.3.0

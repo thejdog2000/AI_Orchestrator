@@ -135,6 +135,14 @@ metrics.py             Computes quality gate pass rate, cost/project, throughput
                          Usage: python metrics.py [--discord] [--days N]
                          Dashboard: metrics tab added to dashboard/index.html.
 
+── Sprint Management ────────────────────────────────────────────────
+sprint_manager.py      24-hour sprint lifecycle. At sprint end: condenses completed
+                         tasks to one-line digest, carries unfinished tasks forward
+                         with carryover=1 flag, advances sprint counter.
+                         State: sprint_state.json  Reviews: sprint_reviews/sprint_NNN.md
+                         Usage: python sprint_manager.py [status|start|end|review]
+                         Schema additions: sprint_id INTEGER, carryover INTEGER on tasks table.
+
 ── Utilities ───────────────────────────────────────────────────────
 validate.py            Pre-flight checklist: run before first overnight session.
                          Checks Ollama, models, env vars (incl. DISCORD_CHANNEL_METRICS),

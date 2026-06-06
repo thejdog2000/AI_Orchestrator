@@ -156,19 +156,40 @@ def evaluate_diff(diff_text: str, task: dict) -> dict:
     Ollama quality gate for low/medium complexity diffs.
     High-complexity diffs skip evaluation and go straight to pending_review.
     json_mode=True prevents markdown wrapping breaking the parser.
+
+    Pass criteria are explicit so "pass" means the same thing across all calls.
+    The gate is a sanity check (did MiniMax produce real code for this task?),
+    NOT a semantic correctness review — it cannot verify logic on truncated diffs.
+
+    Diff truncated to 6000 chars (~3000-4500 tokens), keeping total prompt
+    well within qwen3-coder:30b's 8192-token context window.
     """
     if task.get("complexity") == "high":
         log.info(f"[{task['project']}] High-complexity — skipping Ollama gate")
         return {"score": 7, "pass": True, "issues": [], "reasoning": "High complexity — human review",
                 "gate_skipped": True}
 
+    shown   = min(len(diff_text), 6000)
+    total   = len(diff_text)
+    excerpt = diff_text[:6000]
+
     prompt = (
-        f"Evaluate this code diff.\n"
-        f"Task: {task['description']}\nProject: {task['project']}\n\n"
-        f"Diff (first 2000 chars):\n{diff_text[:2000]}\n\n"
-        f'Return JSON: {{"score":0-10,"pass":true/false,"issues":[],"reasoning":""}}'
+        f"Evaluate this code diff against the task specification.\n\n"
+        f"Task: {task['description']}\n"
+        f"Project: {task['project']}\n"
+        f"Complexity: {task.get('complexity', 'medium')}\n\n"
+        f"Diff ({shown} of {total} chars):\n{excerpt}\n\n"
+        f"Set pass=true only if ALL of the following are true:\n"
+        f"- Diff contains actual code changes (not empty, not prose, not placeholder stubs)\n"
+        f"- File paths match the project language and task scope\n"
+        f"- No obvious syntax errors visible in the diff\n"
+        f"- Changes are plausibly related to the task description\n"
+        f"- No evidence of model refusal, apology text, or TODO-only output\n\n"
+        f"Set pass=false if any of: empty diff, wrong language/extension, obvious syntax errors, "
+        f"model hallucinated prose instead of code, changes clearly unrelated to task.\n\n"
+        f'Return JSON only: {{"score":0-10,"pass":true/false,"issues":[],"reasoning":""}}'
     )
-    raw = ollama_generate(prompt, max_tokens=300, json_mode=True, temperature=0.1)
+    raw = ollama_generate(prompt, max_tokens=500, json_mode=True, temperature=0.1)
     try:
         result = json.loads(raw)
         # Validate required keys are present and types are correct
@@ -483,6 +504,8 @@ def run_task(task: dict, spend_tracker, task_queue):
         fail_path = pending_dir / f"QUALITY_FAILED_{project}_{task['id']}.json"
         fail_path.write_text(json.dumps({"task": task, "evaluation": evaluation}, indent=2))
         task_queue.mark_failed(task, notes=f"quality: {reasoning}")
+        # Persist score separately — mark_failed doesn't carry it, but we need it for metrics
+        task_queue.update_status(task["id"], "failed", quality_score=evaluation.get("score", 0))
         _notify().quality_gate_failed(task, reasoning)
         return
 
@@ -527,6 +550,7 @@ def run_task(task: dict, spend_tracker, task_queue):
             cost_usd=cost,
             model_used=_cfg("MINIMAX_MODEL"),
             system_prompt=result.get("system_prompt", "")[:2000],  # store for auditability
+            quality_score=evaluation.get("score", 0),
         )
         result["commit_hash"] = commit_hash
         _notify().task_committed(task, result, monthly, cap)

@@ -49,3 +49,14 @@ COMMIT_REQUEST.txt
 # Keep generated dashboard HTML so you can open it without running the orchestrator
 # (comment out if you don't want it tracked)
 # dashboard/index.html
+
+# Stale orphan — authoritative copy is agents/personas/ (delete this dir from Finder)
+personas/
+
+# macOS clipboard artifact — safe to delete from Finder
+ORCHESTRATOR_CONTEXT.textClipping
+
+# SQLite WAL/journal artifacts
+orchestrator.db-journal
+orchestrator.db-wal
+orchestrator.db-shm

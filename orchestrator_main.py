@@ -37,7 +37,7 @@ from spend       import SpendTracker
 from task_queue  import TaskQueue
 from dashboard_generator import generate as generate_dashboard
 from task_generator      import generate_tasks_all_projects
-from lang_pipeline       import run_nightly as run_lang_nightly
+from pipeline.lang_pipeline import run_nightly as run_lang_nightly
 
 # ── LOGGING ───────────────────────────────────────────────────────────────────
 

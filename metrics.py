@@ -13,6 +13,19 @@ Metrics tracked:
   - Queue health: queued / running / failed counts
   - Recent failures
 
+NOTE — quality_score reliability:
+  quality_score (0-10 from Ollama) is stored per task but should not be used for
+  threshold decisions or trend analysis until ~100+ scored tasks have accumulated.
+  Until then, the gate boolean (pass/fail) is the operative signal — it tells you
+  whether a task was committed or blocked, not whether the output was actually good.
+
+  TODO: Once 100+ tasks have quality_score > 0, revisit metrics_data() to:
+    - Compute score distribution (p25/p50/p75) per project and perspective
+    - Correlate low scores (<5) with subsequent git reverts or manual fixes
+    - Use score trend (rolling 30-task avg) to detect silent model/prompt degradation
+    - Consider making the pass threshold dynamic (e.g. flag tasks scoring below
+      the project's rolling average by >2 points) rather than the current boolean
+
 Usage:
   python metrics.py              # print snapshot to stdout
   python metrics.py --discord    # post to Discord #metrics channel

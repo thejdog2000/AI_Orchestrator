@@ -97,7 +97,31 @@ def handle_request():
     REQUEST.unlink(missing_ok=True)
 
 
+def _check_stale_pid():
+    """
+    If a PID file already exists, verify the process is still alive
+    before writing a new one. Clears stale PID files automatically.
+    LOW-1 fix: os.kill(pid, 0) confirms the process is actually running.
+    """
+    if not PID_FILE.exists():
+        return
+    pid_str = PID_FILE.read_text().strip()
+    try:
+        pid = int(pid_str)
+        os.kill(pid, 0)   # signal 0 = process existence check, no signal sent
+        # Process is alive — another instance is genuinely running
+        log(f"Another git_watcher already running (pid {pid}) — exiting.")
+        sys.exit(0)
+    except ProcessLookupError:
+        log(f"Stale PID file found (pid {pid_str} — no longer running). Clearing.")
+        PID_FILE.unlink(missing_ok=True)
+    except (ValueError, PermissionError):
+        log(f"Could not read/check PID file — clearing it.")
+        PID_FILE.unlink(missing_ok=True)
+
+
 def run():
+    _check_stale_pid()
     PID_FILE.write_text(str(os.getpid()))
     log(f"git_watcher started (pid {os.getpid()}) — polling every {POLL_SEC}s")
     log(f"Watching: {REQUEST}")

@@ -13,6 +13,8 @@ import logging
 from pathlib import Path
 
 import requests
+# Note: task_generator and dashboard_generator are imported lazily inside run_task()
+# because task_generator imports load_context from this module — lazy import breaks the cycle.
 
 log = logging.getLogger(__name__)
 
@@ -530,8 +532,8 @@ def run_task(task: dict, spend_tracker, task_queue):
 
     # Refill task queue if running low
     if task_queue.total_unblocked(projects=enabled_projects) < refill_threshold:
-        from task_generator import generate_tasks_all_projects
-        from dashboard_generator import generate as generate_dashboard
+        from task_generator import generate_tasks_all_projects       # lazy: circular dep
+        from dashboard_generator import generate as generate_dashboard  # lazy: convenience
         generate_tasks_all_projects(
             task_queue       = task_queue,
             enabled_projects = enabled_projects,

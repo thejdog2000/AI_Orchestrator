@@ -20,6 +20,7 @@ import time
 import logging
 import logging.handlers
 import subprocess
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -80,6 +81,7 @@ def _remove_pid():
 # ── PER-PROJECT EXECUTION LOCKS ───────────────────────────────────────────────
 
 _project_running: dict[str, bool] = {p: False for p in PROJECTS}
+_project_lock = threading.Lock()   # guards read-check-then-write on _project_running
 
 # ── MAIN LOOP ─────────────────────────────────────────────────────────────────
 
@@ -92,34 +94,42 @@ def execute_next_task():
     if not spend_tracker.check_caps():
         return
 
-    task = None
-    for project in ENABLED_PROJECTS:
-        if _project_running.get(project):
-            continue
-        candidate = task_queue.get_next(projects=[project])
-        if candidate:
-            task = candidate
-            break
+    task    = None
+    project = None
 
-    if task is None:
-        for project in ENABLED_PROJECTS:
-            if not _project_running.get(project):
-                gaps = task_queue.get_gap_fill_tasks()
-                if gaps:
-                    task = gaps[0]
-                    break
+    # Atomic check-and-set under lock to prevent concurrent scheduler ticks
+    # from launching two tasks for the same project simultaneously.
+    with _project_lock:
+        for proj in ENABLED_PROJECTS:
+            if _project_running.get(proj):
+                continue
+            candidate = task_queue.get_next(projects=[proj])
+            if candidate:
+                task    = candidate
+                project = proj
+                _project_running[proj] = True
+                break
+
+        if task is None:
+            for proj in ENABLED_PROJECTS:
+                if not _project_running.get(proj):
+                    gaps = task_queue.get_gap_fill_tasks()
+                    if gaps:
+                        task    = gaps[0]
+                        project = proj
+                        _project_running[proj] = True
+                        break
 
     if task is None:
         return
 
-    project = task["project"]
-    _project_running[project] = True
     log.info(f"[{project}] → {task['id']}: {task['description'][:80]}")
 
     try:
         executor.run_task(task, spend_tracker, task_queue)
     finally:
-        _project_running[project] = False
+        with _project_lock:
+            _project_running[project] = False
 
 # ── BACKUP ────────────────────────────────────────────────────────────────────
 

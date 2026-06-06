@@ -15,6 +15,7 @@ import sqlite3
 import json
 import time
 import uuid
+import hashlib
 from datetime import datetime
 from pathlib import Path
 import logging
@@ -92,11 +93,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     completed_at     TEXT,
     committed_at     TEXT,
     commit_hash      TEXT    DEFAULT '',
+    description_hash TEXT    DEFAULT '',
     notes            TEXT    DEFAULT ''
 );
 
-CREATE INDEX IF NOT EXISTS idx_project ON tasks(project);
-CREATE INDEX IF NOT EXISTS idx_status  ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_project          ON tasks(project);
+CREATE INDEX IF NOT EXISTS idx_status           ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_description_hash ON tasks(description_hash);
 """
 
 # ── HELPERS ──────────────────────────────────────────────────────────────────
@@ -107,6 +110,16 @@ def _compute_review_priority(complexity: str, approval_required: bool) -> int:
     if approval_required:
         score += 2
     return min(score, 5)
+
+
+def _description_hash(description: str, project: str) -> str:
+    """
+    8-char hex hash of lowercased, whitespace-normalized description + project.
+    Used to skip near-duplicate tasks from council re-runs.
+    Per-project scoped so identical tasks in different projects are allowed.
+    """
+    normalized = " ".join(description.lower().split())
+    return hashlib.sha256(f"{project}:{normalized}".encode()).hexdigest()[:16]
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -137,30 +150,44 @@ class TaskQueue:
 
     def add_task(self, task: dict) -> bool:
         """
-        Insert a task. Silently skips if id already exists.
-        Expected fields: id, project, description, and any optional fields.
+        Insert a task. Silently skips if:
+          - id already exists (exact duplicate)
+          - description_hash already exists in queued/running state (semantic duplicate)
         Returns True if inserted, False if skipped.
         """
         complexity        = task.get("complexity", "medium")
         approval_required = task.get("approval_required", False)
+        project           = task["project"]
+        description       = task["description"]
+        desc_hash         = _description_hash(description, project)
 
         with self._conn() as conn:
-            existing = conn.execute(
-                "SELECT id FROM tasks WHERE id = ?", (task["id"],)
-            ).fetchone()
-            if existing:
+            # Skip exact ID duplicates
+            if conn.execute(
+                "SELECT 1 FROM tasks WHERE id = ?", (task["id"],)
+            ).fetchone():
+                return False
+
+            # Skip semantic description duplicates still in active state
+            # (completed/failed tasks with same description are fine — may be retried)
+            if conn.execute(
+                "SELECT 1 FROM tasks WHERE description_hash = ? AND project = ? "
+                "AND status IN ('queued', 'running')",
+                (desc_hash, project),
+            ).fetchone():
+                log.debug(f"[{project}] Skipping duplicate description: {description[:60]}")
                 return False
 
             conn.execute("""
                 INSERT INTO tasks (
                     id, project, description, status, priority, approval_required,
                     complexity, rationale, effort_category, perspective, review_priority,
-                    depends_on, blocks, estimated_tokens, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    depends_on, blocks, estimated_tokens, description_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 task["id"],
-                task["project"],
-                task["description"],
+                project,
+                description,
                 task.get("status", "queued"),
                 task.get("priority", 1),
                 int(approval_required),
@@ -172,6 +199,7 @@ class TaskQueue:
                 json.dumps(task.get("depends_on", [])),
                 json.dumps(task.get("blocks", [])),
                 task.get("estimated_tokens", 0),
+                desc_hash,
                 datetime.now().isoformat(),
             ))
         return True

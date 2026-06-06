@@ -2,9 +2,9 @@
 task_generator.py
 Council-based task generation using sequential single-perspective MiniMax API calls.
 
-ARCHITECTURE (revised — see ORCHESTRATOR_CONTEXT.md):
-  Ollama:  digest prose, Aider prompt writing only
-  MiniMax: council task generation + high-complexity quality gates
+ARCHITECTURE (see ORCHESTRATOR_CONTEXT.md):
+  Ollama:  digest prose, execution prompt writing, quality gate evaluation
+  MiniMax: council task generation (perspective calls + merge), all code generation
 
 WHY MiniMax for task generation (not Ollama):
   - 30B models break multi-persona debate formats (format adherence degrades past ~2 advisors)

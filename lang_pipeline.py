@@ -124,34 +124,85 @@ export const scene = {
 # ── SCHEDULE STATE ────────────────────────────────────────────────────────────
 
 def _load_state() -> dict:
+    """
+    Load schedule state from lang_schedule.json.
+    State structure:
+      current_night: int     — which night we're on (1-7, set explicitly)
+      scenes: {scene_id: {status, attempts, last_run}}
+    """
     if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
-    return {s["id"]: {"status": "pending", "attempts": 0, "last_run": None}
-            for s in SCENE_SCHEDULE}
+        data = json.loads(STATE_FILE.read_text())
+        # Migrate old flat format (scene_id → {status, attempts}) to new nested format
+        if "scenes" not in data:
+            data = {
+                "current_night": _infer_night_from_legacy(data),
+                "scenes":        data,
+            }
+        return data
+    return {
+        "current_night": 1,
+        "scenes": {s["id"]: {"status": "pending", "attempts": 0, "last_run": None}
+                   for s in SCENE_SCHEDULE},
+    }
+
+
+def _infer_night_from_legacy(flat_state: dict) -> int:
+    """
+    One-time migration helper: infer night number from old flat state format.
+    Only called when upgrading from the old format — not used after migration.
+    """
+    passed_nights = {
+        SCENE_SCHEDULE[[s["id"] for s in SCENE_SCHEDULE].index(sid)]["night"]
+        for sid, v in flat_state.items() if v.get("status") == "pass"
+        if sid in [s["id"] for s in SCENE_SCHEDULE]
+    }
+    return (max(passed_nights) + 1) if passed_nights else 1
+
 
 def _save_state(state: dict):
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
+
+def _current_night(state: dict) -> int:
+    """Read current night from state. Explicit, not inferred from scene status (MED-3 fix)."""
+    return state.get("current_night", 1)
+
+
+def _advance_night_if_complete(state: dict) -> bool:
+    """
+    After a nightly run, check if all scenes for the current night have passed.
+    If so, increment current_night. Returns True if night advanced.
+    """
+    night = _current_night(state)
+    night_scenes = [s for s in SCENE_SCHEDULE if s["night"] == night]
+    if not night_scenes:
+        # Night 7 = buffer night, always advance
+        state["current_night"] = min(night + 1, 7)
+        return True
+
+    all_passed = all(
+        state["scenes"].get(s["id"], {}).get("status") == "pass"
+        for s in night_scenes
+    )
+    if all_passed:
+        state["current_night"] = min(night + 1, 7)
+        log.info(f"[lang] Night {night} complete — advancing to night {state['current_night']}")
+        return True
+    return False
+
+
 def _due_tonight(state: dict, night_number: int) -> list[dict]:
-    """Return scenes due tonight: scheduled night <= tonight OR previously failed."""
+    """Return scenes due tonight: scheduled night == tonight OR previously failed."""
     due = []
+    scenes = state.get("scenes", {})
     for scene in SCENE_SCHEDULE:
-        s = state.get(scene["id"], {})
+        s      = scenes.get(scene["id"], {})
         status = s.get("status", "pending")
         if status == "pass":
             continue
-        if scene["night"] <= night_number or status == "fail":
+        if scene["night"] == night_number or status == "fail":
             due.append(scene)
     return due
-
-def _detect_night_number(state: dict) -> int:
-    """Infer which night we're on from how many scenes have passed."""
-    passed_nights = {
-        SCENE_SCHEDULE[[s["id"] for s in SCENE_SCHEDULE].index(sid)]["night"]
-        for sid, v in state.items() if v.get("status") == "pass"
-        if sid in [s["id"] for s in SCENE_SCHEDULE]
-    }
-    return (max(passed_nights) + 1) if passed_nights else 1
 
 # ── MINIMAX + OLLAMA ──────────────────────────────────────────────────────────
 
@@ -338,7 +389,7 @@ def run_nightly():
         return
 
     state        = _load_state()
-    night_number = _detect_night_number(state)
+    night_number = _current_night(state)   # MED-3: explicit, not inferred from scene status
     due          = _due_tonight(state, night_number)
 
     if not due:
@@ -351,7 +402,7 @@ def run_nightly():
     for scene in due:
         sid = scene["id"]
         log.info(f"[lang] Generating: {sid}")
-        s = state.setdefault(sid, {"status": "pending", "attempts": 0, "last_run": None})
+        s = state["scenes"].setdefault(sid, {"status": "pending", "attempts": 0, "last_run": None})
         s["attempts"] += 1
         s["last_run"]  = datetime.now().isoformat()
 
@@ -370,10 +421,15 @@ def run_nightly():
             failed += 1
         else:
             s["status"] = "pass"
+            s.pop("error", None)
             passed += 1
 
         _save_state(state)
         time.sleep(2)   # brief pause between scenes
+
+    # Advance to next night if all scenes for tonight passed
+    _advance_night_if_complete(state)
+    _save_state(state)
 
     log.info(
         f"[lang] Night {night_number} complete: "
@@ -385,20 +441,24 @@ def run_nightly():
 # ── STATUS REPORT ─────────────────────────────────────────────────────────────
 
 def show_status():
-    state = _load_state()
-    print(f"\nLanguage Pipeline — Scene Schedule\n{'─'*60}")
+    state       = _load_state()
+    scenes_data = state.get("scenes", {})
+    current     = _current_night(state)
+    print(f"\nLanguage Pipeline — Scene Schedule (current night: {current})\n{'─'*60}")
     for night in range(1, 8):
-        scenes = [s for s in SCENE_SCHEDULE if s["night"] == night]
-        if not scenes:
-            print(f"  Night {night}: buffer (retries + gap fill)")
+        night_scenes = [s for s in SCENE_SCHEDULE if s["night"] == night]
+        marker = " ◀ tonight" if night == current else ""
+        if not night_scenes:
+            print(f"  Night {night}: buffer (retries + gap fill){marker}")
             continue
-        print(f"  Night {night}:")
-        for s in scenes:
-            st     = state.get(s["id"], {})
+        print(f"  Night {night}:{marker}")
+        for s in night_scenes:
+            st     = scenes_data.get(s["id"], {})
             status = st.get("status", "pending")
             icon   = {"pass": "✓", "fail": "✗", "pending": "○"}.get(status, "○")
             att    = st.get("attempts", 0)
-            print(f"    {icon} {s['id']:<28} {status:<8} attempts={att}")
+            err    = f" [{st.get('error','')}]" if status == "fail" else ""
+            print(f"    {icon} {s['id']:<28} {status:<8} attempts={att}{err}")
     print()
 
 

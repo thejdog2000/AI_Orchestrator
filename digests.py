@@ -43,7 +43,7 @@ def generate_digest(period: str, task_queue, spend_tracker) -> str:
         f"- Enabled projects: {_cfg('ENABLED_PROJECTS')}\n\n"
         f"Write the {period} digest:"
     )
-    return ollama_generate(prompt, max_tokens=600, model=_cfg("OLLAMA_MODEL_DIGEST"))
+    return ollama_generate(prompt, max_tokens=600, model=_cfg("OLLAMA_MODEL_DIGEST"), temperature=0.5)
 
 
 def write_digest(period: str, task_queue, spend_tracker):

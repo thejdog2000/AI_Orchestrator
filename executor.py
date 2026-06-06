@@ -68,24 +68,35 @@ def _cfg(key: str):
 # ── OLLAMA ────────────────────────────────────────────────────────────────────
 
 def ollama_generate(
-    prompt:     str,
-    max_tokens: int  = 1000,
-    json_mode:  bool = False,
-    model:      str  = None,
+    prompt:      str,
+    max_tokens:  int   = 1000,
+    json_mode:   bool  = False,
+    model:       str   = None,
+    temperature: float = None,
 ) -> str:
     """
     Call local Ollama.
       - digest prose      → qwen3:14b  (faster, lighter)
       - execution prompts → qwen3-coder:30b
     num_ctx always 8192 — default 2048 silently truncates.
+
+    temperature guidelines (explicit > Ollama default which varies by model):
+      0.1  — evaluation/quality gate (deterministic, not creative)
+      0.2  — CONTEXT.md update (factual summarization)
+      0.3  — prompt writing (focused, slight variation acceptable)
+      0.5  — digest prose (readable variety acceptable)
     """
     model = model or _cfg("OLLAMA_MODEL_CODE")
     try:
+        options: dict = {"num_ctx": 8192, "num_predict": max_tokens}
+        if temperature is not None:
+            options["temperature"] = temperature
+
         payload: dict = {
             "model":   model,
             "prompt":  prompt,
             "stream":  False,
-            "options": {"num_ctx": 8192, "num_predict": max_tokens},
+            "options": options,
         }
         if json_mode:
             payload["format"] = "json"
@@ -111,7 +122,7 @@ def write_execution_prompt(task: dict, context_md: str) -> str:
         f"CONTEXT:\n{context_md[:2000]}\n\n"
         f"System prompt:"
     )
-    result = ollama_generate(prompt, max_tokens=600)
+    result = ollama_generate(prompt, max_tokens=600, temperature=0.3)
     return result.strip() if result else task["description"]
 
 
@@ -134,7 +145,7 @@ def revise_execution_prompt(task: dict, context_md: str, evaluation: dict) -> st
         f"CONTEXT:\n{context_md[:1500]}\n\n"
         f"Write an improved system prompt that specifically avoids these issues:"
     )
-    result = ollama_generate(prompt, max_tokens=600)
+    result = ollama_generate(prompt, max_tokens=600, temperature=0.3)
     return result.strip() if result else write_execution_prompt(task, context_md)
 
 
@@ -154,7 +165,7 @@ def evaluate_diff(diff_text: str, task: dict) -> dict:
         f"Diff (first 2000 chars):\n{diff_text[:2000]}\n\n"
         f'Return JSON: {{"score":0-10,"pass":true/false,"issues":[],"reasoning":""}}'
     )
-    raw = ollama_generate(prompt, max_tokens=300, json_mode=True)
+    raw = ollama_generate(prompt, max_tokens=300, json_mode=True, temperature=0.1)
     try:
         result = json.loads(raw)
         # Validate required keys are present and types are correct
@@ -195,7 +206,7 @@ def update_context_md(task: dict, diff_text: str, repo_path: Path) -> bool:
     )
 
     # Use digest model — CONTEXT.md update is prose summarization, not code generation
-    updated = ollama_generate(prompt, max_tokens=1500, model=_cfg("OLLAMA_MODEL_DIGEST"))
+    updated = ollama_generate(prompt, max_tokens=1500, model=_cfg("OLLAMA_MODEL_DIGEST"), temperature=0.2)
     if updated and len(updated) > 100:
         context_path.write_text(updated)
         log.info(f"[{task['project']}] CONTEXT.md updated ({len(updated)} chars)")

@@ -235,7 +235,7 @@ Output: green checkmarks or red X with fix instructions. Zero ambiguity.
 
 ---
 
-## 🟠 FEAT-Temperature: Explicit Temperature on All Ollama Calls
+## ✅ FEAT-Temperature: Explicit Temperature on All Ollama Calls *(implemented 2026-06-06)*
 
 **Small change, measurable quality improvement. Ollama's default temperature varies by model.**
 

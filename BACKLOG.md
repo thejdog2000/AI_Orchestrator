@@ -277,7 +277,7 @@ Wire up: `task_generator.py` loads persona file content into each perspective ca
 
 ---
 
-## 🟡 FEAT-2: Notifications (email/SMS fallback)
+## ✅ FEAT-2: Notifications (email/SMS fallback) *(implemented 2026-06-06)*
 
 **Fallback channels when Discord bot isn't available. Lower priority since Discord handles the primary case.**
 

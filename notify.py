@@ -267,3 +267,128 @@ def orchestrator_started(enabled_projects: list, monthly_spend: float, cap: floa
 def orchestrator_stopped() -> bool:
     """Post to #live when orchestrator shuts down."""
     return post("live", "🛑  **Orchestrator stopped**")
+
+
+# ── FALLBACK NOTIFICATION CHANNELS ────────────────────────────────────────────
+#
+# Used when Discord is unavailable or as supplementary push.
+# All channels are optional — graceful no-op if env vars not set.
+#
+# Setup:
+#   ntfy.sh:  export NTFY_TOPIC="jacobs-orchestrator-abc123"
+#   email:    export SMTP_HOST=smtp.gmail.com SMTP_PORT=587
+#             export SMTP_USER="..." SMTP_PASS="..." NOTIFY_EMAIL="..."
+#   macOS:    no setup — uses osascript (local machine only, daytime fallback)
+#
+# Priority order for send_fallback(): ntfy → email → macOS notification
+
+
+def _ntfy_send(subject: str, body: str) -> bool:
+    """Push via ntfy.sh — free, zero-config, works on mobile."""
+    topic = os.environ.get("NTFY_TOPIC", "")
+    if not topic:
+        return False
+    try:
+        resp = requests.post(
+            f"https://ntfy.sh/{topic}",
+            data=body.encode(),
+            headers={
+                "Title":    subject[:250],
+                "Priority": "default",
+                "Tags":     "robot",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        log.debug(f"ntfy.sh send failed: {e}")
+        return False
+
+
+def _smtp_send(subject: str, body: str) -> bool:
+    """Send email via SMTP. Requires SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, NOTIFY_EMAIL."""
+    host  = os.environ.get("SMTP_HOST", "")
+    port  = int(os.environ.get("SMTP_PORT", "587"))
+    user  = os.environ.get("SMTP_USER", "")
+    passw = os.environ.get("SMTP_PASS", "")
+    to    = os.environ.get("NOTIFY_EMAIL", "")
+
+    if not all([host, user, passw, to]):
+        return False
+
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        msg = MIMEText(body)
+        msg["Subject"] = f"[Orchestrator] {subject}"
+        msg["From"]    = user
+        msg["To"]      = to
+
+        with smtplib.SMTP(host, port, timeout=15) as s:
+            s.starttls()
+            s.login(user, passw)
+            s.sendmail(user, [to], msg.as_string())
+        return True
+    except Exception as e:
+        log.debug(f"SMTP send failed: {e}")
+        return False
+
+
+def _macos_notify(subject: str, body: str) -> bool:
+    """macOS notification via osascript — local only, no setup required."""
+    import subprocess
+    try:
+        script = (
+            f'display notification "{body[:200]}" '
+            f'with title "Orchestrator" subtitle "{subject[:100]}"'
+        )
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, timeout=5,
+        )
+        return result.returncode == 0
+    except Exception as e:
+        log.debug(f"macOS notify failed: {e}")
+        return False
+
+
+def send_fallback(subject: str, body: str, channels: list = None) -> bool:
+    """
+    Send via fallback notification channels in priority order.
+    channels: list of channel names to try, or None for all (ntfy, email, macos)
+    Returns True if at least one channel succeeded.
+
+    Use for: critical alerts when Discord is down, supplementary push notifications,
+             overnight completion summaries you want on mobile without opening Discord.
+    """
+    available = {
+        "ntfy":  _ntfy_send,
+        "email": _smtp_send,
+        "macos": _macos_notify,
+    }
+    channels = channels or ["ntfy", "email", "macos"]
+    any_success = False
+
+    for channel in channels:
+        fn = available.get(channel)
+        if fn:
+            try:
+                if fn(subject, body):
+                    log.debug(f"Fallback notify sent via {channel}")
+                    any_success = True
+                    break   # stop at first success
+            except Exception as e:
+                log.debug(f"Fallback {channel} error: {e}")
+
+    return any_success
+
+
+def critical_alert(subject: str, body: str) -> bool:
+    """
+    Send to ALL channels — Discord + all fallbacks.
+    Use for: spend cap hit, repeated failures, orchestrator crash.
+    """
+    discord_ok  = post("live", f"🚨  **{subject}**\n{body[:1500]}")
+    fallback_ok = send_fallback(subject, body, channels=["ntfy", "email", "macos"])
+    return discord_ok or fallback_ok

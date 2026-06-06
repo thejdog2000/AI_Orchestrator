@@ -96,7 +96,9 @@ def check_env_vars():
          "export DISCORD_CHANNEL_CHAT='...'"),
     ]
     vars_optional = [
-        ("DISCORD_USER_ID",  "Discord user ID (for DMs)"),
+        ("DISCORD_USER_ID", "Discord user ID (for DMs)"),
+        ("NTFY_TOPIC",      "ntfy.sh push topic (fallback channel)"),
+        ("NOTIFY_EMAIL",    "notification email address (fallback channel)"),
     ]
     for var, label, fix in vars_required:
         check(f"{var} set ({label})", bool(os.environ.get(var)), fix=fix)

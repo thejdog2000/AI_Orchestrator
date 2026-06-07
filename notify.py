@@ -222,12 +222,16 @@ def blocked_embed(task: dict, reason: str, detail: str = "", blocked_since: str 
             "inline": False,
         })
 
+    task_id  = task.get("id", "")
+    dash_url = f"http://localhost:{_dashboard_port()}"
+
     embed = {
         "color":  color,
         "title":  title,
+        "url":    dash_url,   # makes the title a clickable link to the dashboard
         "fields": fields,
         "footer": {
-            "text": f"Dashboard: http://localhost:{_dashboard_port()} | ID: {task.get('id', '?')}"
+            "text": f"{task_id} · {dash_url}"
         },
     }
 

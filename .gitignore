@@ -2,6 +2,8 @@
 .env
 *.env
 .env.*
+# Template with placeholder values — safe and useful to commit
+!.env.example
 
 # Runtime state — regenerated on each run
 orchestrator.db

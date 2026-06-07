@@ -371,6 +371,10 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
         log.error(f"[{project}] MiniMax call failed: {e}")
         return {"success": False, "error": str(e)}
 
+    # Strip thinking blocks — M2.7/M3 output <think>...</think> before file content.
+    if "</think>" in content:
+        content = content.split("</think>", 1)[-1].strip()
+
     file_blocks = _parse_file_blocks(content)
     if not file_blocks:
         log.warning(f"[{project}] No file blocks for {task['id']}. Preview: {content[:300]}")

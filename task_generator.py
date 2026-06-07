@@ -32,7 +32,8 @@ from task_queue import TaskQueue, PERSPECTIVE_PROJECT_MAP
 from executor   import load_context
 from config     import MINIMAX_API_BASE, MINIMAX_MODEL, REPO_PATHS, BASE_DIR
 
-PERSONAS_DIR = BASE_DIR / "agents" / "personas" / "domain"
+_personas_env = os.environ.get("ORCHESTRATOR_PERSONAS_DIR")
+PERSONAS_DIR  = Path(_personas_env) if _personas_env else BASE_DIR / "agents" / "personas" / "domain"
 
 log = logging.getLogger(__name__)
 

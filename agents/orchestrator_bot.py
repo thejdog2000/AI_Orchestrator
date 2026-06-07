@@ -57,12 +57,12 @@ intents.message_content = True
 client  = discord.Client(intents=intents)
 
 
-def _chat_channel_id() -> int | None:
+def _chat_channel_id() -> "int | None":
     raw = os.environ.get("DISCORD_CHANNEL_CHAT", "")
     return int(raw) if raw.isdigit() else None
 
 
-def _authorized_user_id() -> int | None:
+def _authorized_user_id() -> "int | None":
     raw = os.environ.get("DISCORD_USER_ID", "")
     return int(raw) if raw.isdigit() else None
 

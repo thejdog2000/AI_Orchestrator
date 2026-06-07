@@ -41,7 +41,7 @@ task_queue = TaskQueue()
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
-def _find_diff(task_id: str) -> Path | None:
+def _find_diff(task_id: str) -> "Path | None":
     matches = list(PENDING_DIR.glob(f"*{task_id}*.diff"))
     if len(matches) == 1:
         return matches[0]

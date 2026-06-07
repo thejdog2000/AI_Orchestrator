@@ -57,6 +57,21 @@ def generate() -> Path:
     colors_json  = json.dumps(PROJECT_COLORS)
     metrics_json = json.dumps(metrics, default=str)
 
+    # Pre-computed to avoid backslashes inside f-string expressions (Python 3.9 compat)
+    project_pills = " ".join(
+        '<span class="pill" data-filter="project" data-value="{p}" '
+        'onclick="setFilter(\'project\',\'{p}\',this)" '
+        'style="border-color:{c}">{p}</span>'.format(p=p, c=PROJECT_COLORS.get(p, "#555"))
+        for p in projects
+    )
+    perspective_pills = "".join(
+        '<span class="pill" data-filter="perspective" data-value="{p}" '
+        'onclick="setFilter(\'perspective\',\'{p}\',this)">{label}</span>'.format(
+            p=p, label=p.replace("_", " ")
+        )
+        for p in PERSPECTIVES
+    )
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -196,11 +211,11 @@ def generate() -> Path:
 <div class="filters">
   <span class="filter-label">Project</span>
   <span class="pill active" data-filter="project" data-value="all" onclick="setFilter('project','all',this)">All</span>
-  {' '.join(f'<span class="pill" data-filter="project" data-value="{p}" onclick="setFilter(\'project\',\'{p}\',this)" style="border-color:{PROJECT_COLORS.get(p,\'#555\')}">{p}</span>' for p in projects)}
+  {project_pills}
   &nbsp;
   <span class="filter-label">Perspective</span>
   <span class="pill active" data-filter="perspective" data-value="all" onclick="setFilter('perspective','all',this)">All</span>
-  {''.join(f'<span class="pill" data-filter="perspective" data-value="{p}" onclick="setFilter(\'perspective\',\'{p}\',this)">{p.replace("_"," ")}</span>' for p in PERSPECTIVES)}
+  {perspective_pills}
   &nbsp;
   <span class="filter-label">Complexity</span>
   <span class="pill active" data-filter="complexity" data-value="all" onclick="setFilter('complexity','all',this)">All</span>

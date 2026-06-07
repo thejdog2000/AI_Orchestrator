@@ -282,7 +282,7 @@ class TaskQueue:
 
     # ── READ ─────────────────────────────────────────────────────────────────
 
-    def get_next(self, projects: list = None) -> dict | None:
+    def get_next(self, projects: list = None) -> "dict | None":
         """
         Return next runnable task: not approval_required, all depends_on satisfied,
         status=queued. Sorted by priority ASC, review_priority DESC (harder first).

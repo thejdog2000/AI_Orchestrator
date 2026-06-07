@@ -274,6 +274,13 @@ def _safe_write(repo_path: Path, rel_path: str, content: str) -> bool:
     return True
 
 
+class _MiniMaxTimeout(Exception):
+    """Raised on API timeout. Carries estimated input token count for partial spend recording."""
+    def __init__(self, estimated_input_tokens: int):
+        super().__init__(f"MiniMax API timed out (~{estimated_input_tokens} input tokens)")
+        self.estimated_input_tokens = estimated_input_tokens
+
+
 def _minimax_chat(
     system:     str,
     user:       str,
@@ -289,20 +296,28 @@ def _minimax_chat(
     if not api_key:
         raise EnvironmentError("MINIMAX_API_KEY not set")
 
-    resp = requests.post(
-        f"{_cfg('MINIMAX_API_BASE')}/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model":       _cfg("MINIMAX_MODEL"),
-            "messages":    [
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user},
-            ],
-            "temperature": temperature,
-            "max_tokens":  max_tokens,
-        },
-        timeout=120,
-    )
+    # Estimate input tokens before the call — used for partial spend on timeout.
+    # MiniMax benchmark: ~750 words = 1000 tokens ≈ chars/4.
+    estimated_input_tokens = (len(system) + len(user)) // 4
+
+    try:
+        resp = requests.post(
+            f"{_cfg('MINIMAX_API_BASE')}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model":       _cfg("MINIMAX_MODEL"),
+                "messages":    [
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user},
+                ],
+                "temperature": temperature,
+                "max_tokens":  max_tokens,
+            },
+            timeout=300,
+        )
+    except requests.exceptions.Timeout:
+        raise _MiniMaxTimeout(estimated_input_tokens)
+
     resp.raise_for_status()
     data  = resp.json()
     usage = data.get("usage", {})
@@ -349,6 +364,9 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
         return {"success": False, "error": str(e)}
     except requests.HTTPError as e:
         return {"success": False, "error": f"api_http_{e.response.status_code}"}
+    except _MiniMaxTimeout as e:
+        log.warning(f"[{project}] MiniMax timeout — {e}")
+        return {"success": False, "error": str(e), "estimated_input_tokens": e.estimated_input_tokens}
     except Exception as e:
         log.error(f"[{project}] MiniMax call failed: {e}")
         return {"success": False, "error": str(e)}
@@ -488,6 +506,17 @@ def run_task(task: dict, spend_tracker, task_queue):
     if not result or not result["success"]:
         error = str(result.get("error", "unknown")) if result else "no_result"
         log.error(f"[{project}] {task['id']} failed after {max_retries} attempts")
+
+        # Record partial spend for any timeout attempts — MiniMax bills input tokens
+        # processed before timeout even though we never got a response.
+        if result and result.get("estimated_input_tokens"):
+            spend_tracker.record_partial(
+                project,
+                result["estimated_input_tokens"],
+                _cfg("MINIMAX_MODEL"),
+                reason=f"timeout after {max_retries} attempts",
+            )
+
         fail_path = pending_dir / f"FAILED_{project}_{task['id']}.json"
         fail_path.write_text(json.dumps({"task": task, "result": result}, indent=2))
         task_queue.mark_failed(task, notes=error)

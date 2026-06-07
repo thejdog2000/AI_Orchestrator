@@ -91,7 +91,13 @@ def _parse_intent(message: str) -> dict:
         )
         resp.raise_for_status()
         raw = resp.json().get("response", "{}")
-        return json.loads(raw)
+        # qwen3 thinking models wrap output in <think>...</think> before the JSON
+        if "<think>" in raw:
+            raw = raw.split("</think>")[-1].strip()
+        parsed = json.loads(raw)
+        if not parsed or parsed.get("action") == "unknown":
+            return _keyword_fallback(message)
+        return parsed
     except Exception as e:
         log.warning(f"Intent parse failed: {e}")
         return _keyword_fallback(message)

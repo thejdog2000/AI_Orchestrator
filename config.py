@@ -36,7 +36,7 @@ HOME = Path.home()
 
 # Absolute paths — no cwd dependency, no relative path ambiguity
 REPO_PATHS: dict[str, Path] = {
-    "lang":     HOME / "Documents/claude/projects/language-travel-app",
+    "lang":     HOME / "Documents/Claude/Projects/Language Learning App",
     "gamma":    HOME / "Documents/claude/projects/gamma-tool",
     "meridian": HOME / "projects/meridian-mobile",
     "rts":      HOME / "projects/ironhold-rts",
@@ -47,8 +47,8 @@ REPO_PATHS: dict[str, Path] = {
 # ── API / MODEL CONFIG ────────────────────────────────────────────────────────
 
 MINIMAX_API_BASE  = "https://api.minimax.io/v1"
-MINIMAX_MODEL     = "minimax-m3"       # verify at platform.minimax.io before first run
-MINIMAX_SPEND_CAP = 65.0               # USD/month hard cap
+MINIMAX_MODEL     = "MiniMax-M3"       # verify at platform.minimax.io before first run
+MINIMAX_SPEND_CAP = 35.0               # USD/month hard cap
 
 OLLAMA_BASE         = "http://localhost:11434"
 OLLAMA_MODEL_CODE   = "qwen3-coder:30b"   # execution prompts, quality gate

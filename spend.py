@@ -13,9 +13,10 @@ log = logging.getLogger(__name__)
 
 # Rates are set here — update when promo expires (verify at platform.minimax.io)
 MINIMAX_RATES = {
-    "minimax-m3": (0.30, 1.20),   # (input, output) per 1M tokens, promo rate
+    "minimax-m3":   (0.30, 1.20),   # M3 promo rate (7-day 50% off, then 0.60/2.40)
+    "minimax-m2.7": (0.30, 1.20),   # M2.7 standard rate
 }
-DEFAULT_RATE = (0.30, 1.20)
+DEFAULT_RATE = (0.60, 2.40)         # conservative fallback — full rate, no promo assumed
 
 
 class SpendTracker:
@@ -40,7 +41,7 @@ class SpendTracker:
         os.replace(tmp, self.log_file)
 
     def record(self, project: str, input_tokens: int, output_tokens: int, model: str) -> float:
-        input_rate, output_rate = MINIMAX_RATES.get(model, DEFAULT_RATE)
+        input_rate, output_rate = MINIMAX_RATES.get(model.lower(), DEFAULT_RATE)
         cost  = (input_tokens / 1_000_000 * input_rate) + (output_tokens / 1_000_000 * output_rate)
         today = datetime.now().strftime("%Y-%m-%d")
 
@@ -56,6 +57,43 @@ class SpendTracker:
         self.data["total_input_tokens"] += input_tokens
         self.data["total_output_tokens"]+= output_tokens
         self._save()
+        return cost
+
+    def record_partial(self, project: str, estimated_input_tokens: int, model: str, reason: str = "timeout") -> float:
+        """
+        Record estimated spend for a failed/timed-out request.
+        MiniMax bills input tokens processed before a timeout.
+        Tracked separately under partial_usd so it's distinguishable from confirmed spend.
+        """
+        input_rate, _ = MINIMAX_RATES.get(model.lower(), DEFAULT_RATE)
+        cost  = estimated_input_tokens / 1_000_000 * input_rate
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        if today not in self.data["daily"]:
+            self.data["daily"][today] = {"usd": 0.0, "tasks": 0, "by_project": {}}
+
+        # Add to total so cap enforcement sees it
+        self.data["daily"][today]["usd"] += cost
+        self.data["daily"][today]["by_project"].setdefault(project, 0.0)
+        self.data["daily"][today]["by_project"][project] += cost
+        self.data["total_usd"] += cost
+
+        # Track partial separately for auditability
+        self.data.setdefault("partial_usd", 0.0)
+        self.data.setdefault("partial_events", [])
+        self.data["partial_usd"] += cost
+        self.data["partial_events"].append({
+            "date":       today,
+            "project":    project,
+            "est_tokens": estimated_input_tokens,
+            "est_usd":    round(cost, 6),
+            "reason":     reason,
+        })
+        # Keep last 50 events only
+        self.data["partial_events"] = self.data["partial_events"][-50:]
+
+        self._save()
+        log.info(f"[{project}] Partial spend recorded: ~{estimated_input_tokens} input tokens, ~${cost:.4f} ({reason})")
         return cost
 
     def monthly_spend(self) -> float:

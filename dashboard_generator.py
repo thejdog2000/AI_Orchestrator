@@ -864,6 +864,7 @@ function openPbi(pbiId) {{
     </div>
     <div class="pbi-detail-title">${{pbi.title}}</div>
     <span style="font-size:10px;color:var(--muted)">${{pbi.id}} · ${{pbi.status}}</span>
+    ${{pbi.pr_url ? `<a href="${{pbi.pr_url}}" target="_blank" style="font-size:11px;color:var(--blue);text-decoration:none;margin-left:8px">🔗 Review PR</a>` : ''}}
 
     ${{pbi.description ? `<div class="pbi-detail-section"><h4>Description</h4><div class="pbi-detail-body">${{pbi.description}}</div></div>` : ''}}
     ${{pbi.acceptance_criteria ? `<div class="pbi-detail-section"><h4>Acceptance Criteria</h4><div class="pbi-detail-body">${{pbi.acceptance_criteria}}</div></div>` : ''}}

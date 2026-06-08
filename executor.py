@@ -162,6 +162,39 @@ _NON_CODE_EXTENSIONS = re.compile(
 )
 
 
+def _detect_content_shrinkage(diff_text: str, threshold: float = 0.6) -> list[str]:
+    """
+    Return file paths where deletions exceed threshold * (additions + deletions).
+    A file losing >60% of lines is a strong signal MiniMax truncated it.
+    Only fires on files with at least 20 deleted lines (ignores tiny files).
+    """
+    # Parse per-file addition/deletion counts from the diff
+    current_file = None
+    file_adds: dict[str, int] = {}
+    file_dels: dict[str, int] = {}
+
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split(" b/", 1)
+            current_file = parts[1].strip() if len(parts) == 2 else None
+        elif current_file:
+            if line.startswith("+") and not line.startswith("+++"):
+                file_adds[current_file] = file_adds.get(current_file, 0) + 1
+            elif line.startswith("-") and not line.startswith("---"):
+                file_dels[current_file] = file_dels.get(current_file, 0) + 1
+
+    flagged = []
+    for path, dels in file_dels.items():
+        if dels < 20:          # too small to be meaningful
+            continue
+        adds  = file_adds.get(path, 0)
+        total = adds + dels
+        if total > 0 and dels / total > threshold:
+            flagged.append(f"{path} (-{dels}/+{adds})")
+
+    return flagged
+
+
 def _filter_non_code_hunks(diff_text: str) -> tuple[str, list[str]]:
     """
     Strip doc/config-only file sections from a git diff before quality gate evaluation.
@@ -202,6 +235,23 @@ def evaluate_diff(diff_text: str, task: dict) -> dict:
         log.info(f"[{task['project']}] High-complexity — skipping Ollama gate")
         return {"score": 7, "pass": True, "issues": [], "reasoning": "High complexity — human review",
                 "gate_skipped": True}
+
+    # ── SHRINKAGE CHECK ───────────────────────────────────────────────────────
+    # Detect files that lost >60% of their content — strong signal that MiniMax
+    # truncated context-injected files it had no business rewriting.
+    shrinkage_issues = _detect_content_shrinkage(diff_text)
+    if shrinkage_issues:
+        log.warning(f"[{task['project']}] Content shrinkage detected: {shrinkage_issues}")
+        return {
+            "score":    2,
+            "pass":     False,
+            "issues":   [f"File content shrinkage >60%: {', '.join(shrinkage_issues)}"],
+            "reasoning": (
+                f"One or more files lost over 60% of their content: {shrinkage_issues}. "
+                f"This likely means MiniMax truncated context-injected files it didn't need to change. "
+                f"Review the diff before committing — existing content may have been deleted."
+            ),
+        }
 
     filtered, skipped = _filter_non_code_hunks(diff_text)
     if skipped:
@@ -689,7 +739,7 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
         f"<<<FILE: relative/path/to/file.ext>>>\n"
         f"<complete file content>\n"
         f"<<<END>>>\n\n"
-        f"One block per file. ALL changed files. No prose outside the blocks."
+        f"One block per file. ONLY files you actually modified — do NOT re-output context files unchanged or with truncated content. No prose outside the blocks."
     )
 
     log.info(f"[{project}] Executing {task['id']} via MiniMax")
@@ -1180,6 +1230,8 @@ def run_task(task: dict, spend_tracker, task_queue):
                         log.info(f"[{project}] PBI {pbi_id} all tasks done — creating PR")
                         pbi_tasks = _tq2.tasks_for_pbi(pbi_id)
                         pr_url    = create_pbi_pr(_pbi, pbi_tasks, repo_path)
+                        if pr_url:
+                            _tq2.set_pbi_pr_url(pbi_id, pr_url)
                         _notify().pbi_ready_for_review(task, _pbi, pr_url=pr_url)
             except Exception as _e:
                 log.warning(f"[{project}] PBI post-commit hooks failed ({_e}) — non-fatal")

@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS pbis (
     acceptance_criteria  TEXT DEFAULT '',
     affected_files       TEXT DEFAULT '[]',  -- JSON array of repo-relative paths
     handoff_notes        TEXT DEFAULT '{}',  -- JSON {task_id: "150-word summary"} per completed task
+    pr_url               TEXT DEFAULT '',    -- GitHub PR URL once created
     status               TEXT DEFAULT 'active',  -- active | complete | cancelled
     created_at           TEXT
 );
@@ -375,6 +376,10 @@ class TaskQueue:
         with self._conn() as conn:
             row = conn.execute("SELECT handoff_notes FROM pbis WHERE id=?", (pbi_id,)).fetchone()
         return json.loads(row[0] or "{}") if row else {}
+
+    def set_pbi_pr_url(self, pbi_id: str, pr_url: str) -> None:
+        with self._conn() as conn:
+            conn.execute("UPDATE pbis SET pr_url=? WHERE id=?", (pr_url, pbi_id))
 
     def update_pbi_affected_files(self, pbi_id: str, new_files: list) -> None:
         """Append newly discovered files to pbi.affected_files (no duplicates)."""

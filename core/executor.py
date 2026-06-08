@@ -878,8 +878,11 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
         return False
 
     for rel_path, file_content in file_blocks.items():
-        # PBI enforcement: file must match (exact or suffix) an entry in affected_files
-        if writable_set is not None and not _in_writable(rel_path):
+        # PBI enforcement: file must match (exact or suffix) an entry in affected_files.
+        # Exception: new files that don't yet exist are always writable — they can't
+        # be context-rewrite truncations because they have no prior content.
+        file_exists = (repo_path / rel_path).exists()
+        if writable_set is not None and not _in_writable(rel_path) and file_exists:
             skipped_readonly.append(rel_path)
             log.warning(f"[{project}] Skipped read-only context file: {rel_path}")
             continue

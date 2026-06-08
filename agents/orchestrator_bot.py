@@ -29,6 +29,7 @@ import sys
 import logging
 import asyncio
 from pathlib import Path
+from collections import deque
 
 import discord
 
@@ -49,6 +50,28 @@ sys.path.insert(0, str(ORCHESTRATOR))
 
 import notify
 from agents.commands import _parse_intent, _dispatch
+
+# ── PID GUARD — only one instance allowed ─────────────────────────────────────
+
+PID_FILE = ORCHESTRATOR / ".bot.pid"
+
+def _check_pid():
+    if PID_FILE.exists():
+        try:
+            existing = int(PID_FILE.read_text().strip())
+            os.kill(existing, 0)  # signal 0 = existence check
+            log.error(f"Bot already running (pid {existing}). Kill it first: kill {existing}")
+            sys.exit(1)
+        except (ProcessLookupError, ValueError):
+            pass  # stale PID — clear it
+    PID_FILE.write_text(str(os.getpid()))
+
+def _clear_pid():
+    PID_FILE.unlink(missing_ok=True)
+
+# ── MESSAGE DEDUP — ignore replayed/duplicate message IDs ─────────────────────
+
+_seen_message_ids: deque = deque(maxlen=256)
 
 # ── DISCORD SETUP ─────────────────────────────────────────────────────────────
 
@@ -92,6 +115,11 @@ async def on_message(message: discord.Message):
     if authorized and message.author.id != authorized:
         log.warning(f"Ignoring message from unauthorized user {message.author} ({message.author.id})")
         return
+
+    # Dedup — Discord occasionally delivers the same message twice
+    if message.id in _seen_message_ids:
+        return
+    _seen_message_ids.append(message.id)
 
     content = message.content.strip()
     if not content:
@@ -146,5 +174,9 @@ if __name__ == "__main__":
     if not chat_id:
         log.warning("DISCORD_CHANNEL_CHAT not set — bot will respond in ANY channel it can see.")
 
-    log.info("Starting Orchestrator Discord bot…")
-    client.run(token)
+    _check_pid()
+    try:
+        log.info("Starting Orchestrator Discord bot…")
+        client.run(token)
+    finally:
+        _clear_pid()

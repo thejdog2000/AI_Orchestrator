@@ -11,6 +11,7 @@ orchestrator.db-shm
 orchestrator.db-wal
 orchestrator.db-journal
 orchestrator.pid
+.bot.pid
 logs/
 pending_review/
 dashboard/

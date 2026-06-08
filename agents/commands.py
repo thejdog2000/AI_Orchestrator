@@ -22,9 +22,9 @@ ORCHESTRATOR = BASE_DIR.parent         # Orchestrator/
 sys.path.insert(0, str(ORCHESTRATOR))
 
 from config import CFG, DB_PATH, MINIMAX_SPEND_CAP
-from spend  import SpendTracker
-from task_queue import TaskQueue
-import notify
+from core.spend import SpendTracker
+from core.task_queue import TaskQueue
+import core.notify as notify
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 
@@ -32,7 +32,7 @@ log = logging.getLogger("orchestrator_bot")
 
 OLLAMA_BASE        = CFG.get("OLLAMA_BASE",         "http://localhost:11434")
 OLLAMA_MODEL_CHAT  = CFG.get("OLLAMA_MODEL_DIGEST", "qwen3:14b")
-SPEND_LOG          = ORCHESTRATOR / "logs" / "spend.json"
+SPEND_LOG          = ORCHESTRATOR / "data" / "logs" / "spend.json"
 DASHBOARD_PORT     = int(os.environ.get("DASHBOARD_PORT", "8080"))
 
 

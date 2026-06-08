@@ -232,7 +232,7 @@ def _generate_narrative(stats: dict, tasks: dict, date: str, sprint_features: di
         from config import CFG
         if not executor._config:
             executor.configure(CFG)
-        from executor import ollama_generate
+        from core.executor import ollama_generate
         raw = ollama_generate(
             _build_narrative_prompt(stats, tasks, date, sprint_features),
             max_tokens=1200,

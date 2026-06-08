@@ -1,7 +1,7 @@
 """
 config.py
 Single source of truth for all runtime configuration.
-Imported by orchestrator_main, executor, task_generator, lang_pipeline, digests.
+Imported by orchestrator_main and all subpackages (core/, analytics/, dashboard/).
 
 Update this file when:
   - Switching Ollama models (run `ollama list` to verify names)
@@ -16,18 +16,19 @@ from pathlib import Path
 # ── DIRECTORIES ───────────────────────────────────────────────────────────────
 
 BASE_DIR      = Path(__file__).parent
-TASKS_DIR     = BASE_DIR / "tasks"
-PENDING_DIR   = BASE_DIR / "pending_review"
-APPROVED_DIR  = BASE_DIR / "approved"
-LOGS_DIR      = BASE_DIR / "logs"
-BACKUPS_DIR   = BASE_DIR / "backups"
-DASHBOARD_DIR = BASE_DIR / "dashboard"
-RETROS_DIR        = BASE_DIR / "retros"
-PIPELINE_LOGS_DIR = BASE_DIR / "pipeline_logs"
-PID_FILE      = BASE_DIR / "orchestrator.pid"
-DB_PATH       = BASE_DIR / "orchestrator.db"
+DATA_DIR      = BASE_DIR / "data"          # all runtime data lives here
+TASKS_DIR     = DATA_DIR  / "tasks"
+PENDING_DIR   = DATA_DIR  / "pending_review"
+APPROVED_DIR  = DATA_DIR  / "approved"
+LOGS_DIR      = DATA_DIR  / "logs"
+BACKUPS_DIR   = DATA_DIR  / "backups"
+RETROS_DIR    = DATA_DIR  / "retros"
+PIPELINE_LOGS_DIR = DATA_DIR / "pipeline_logs"
+DASHBOARD_DIR = BASE_DIR  / "dashboard" / "output"  # generated HTML
+PID_FILE      = BASE_DIR  / "orchestrator.pid"
+DB_PATH       = BASE_DIR  / "orchestrator.db"
 
-for _d in [TASKS_DIR, PENDING_DIR, APPROVED_DIR, LOGS_DIR, BACKUPS_DIR, DASHBOARD_DIR, RETROS_DIR, PIPELINE_LOGS_DIR]:
+for _d in [DATA_DIR, TASKS_DIR, PENDING_DIR, APPROVED_DIR, LOGS_DIR, BACKUPS_DIR, DASHBOARD_DIR, RETROS_DIR, PIPELINE_LOGS_DIR]:
     _d.mkdir(exist_ok=True)
 
 # ── PROJECTS ──────────────────────────────────────────────────────────────────

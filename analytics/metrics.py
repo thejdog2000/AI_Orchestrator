@@ -48,9 +48,9 @@ BASE_DIR = Path(__file__).parent
 sys.path.insert(0, str(BASE_DIR))
 
 from config import CFG, MINIMAX_SPEND_CAP
-from task_queue import TaskQueue
-from spend import SpendTracker
-import notify
+from core.task_queue import TaskQueue
+from core.spend import SpendTracker
+import core.notify as notify
 
 LOGS_DIR = CFG["LOGS_DIR"] if isinstance(CFG.get("LOGS_DIR"), Path) else BASE_DIR / "logs"
 

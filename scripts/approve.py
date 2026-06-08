@@ -33,8 +33,8 @@ from config import BASE_DIR, PENDING_DIR, APPROVED_DIR, REPO_PATHS
 APPROVED_DIR.mkdir(exist_ok=True)
 (BASE_DIR / "pending_review").mkdir(exist_ok=True)
 
-from task_queue import TaskQueue
-import notify
+from core.task_queue import TaskQueue
+import core.notify as notify
 
 task_queue = TaskQueue()
 

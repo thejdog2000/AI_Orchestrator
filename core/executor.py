@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 # notify is imported lazily to avoid circular-import risk at startup.
 # Use _notify() wherever you need it.
 def _notify():
-    import notify as _n
+    import core.notify as _n
     return _n
 
 # Imported by orchestrator_main — set there, referenced here via module-level vars
@@ -330,7 +330,7 @@ def update_context_md(task: dict, diff_text: str, repo_path: Path) -> bool:
 
     log.warning(f"[{task['project']}] CONTEXT.md update skipped — Ollama returned nothing useful")
     try:
-        import notify as _notify_mod
+        import core.notify as _notify_mod
         _notify_mod.post("live", f"⚠️ **[{task['project']}]** CONTEXT.md update failed — next task runs against stale context")
     except Exception:
         pass
@@ -690,7 +690,7 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
     pbi_id      = task.get("pbi_id")
     if pbi_id:
         try:
-            from task_queue import TaskQueue
+            from core.task_queue import TaskQueue
             _tq  = TaskQueue(_cfg("DB_PATH"))
             pbi  = _tq.get_pbi(pbi_id)
             if pbi:
@@ -1294,7 +1294,7 @@ def run_task(task: dict, spend_tracker, task_queue):
         pbi_id = task.get("pbi_id")
         if pbi_id and result.get("diff_text"):
             try:
-                from task_queue import TaskQueue as _TQ
+                from core.task_queue import TaskQueue as _TQ
                 _tq2 = _TQ(_cfg("DB_PATH"))
                 _pbi = _tq2.get_pbi(pbi_id)
                 if _pbi:
@@ -1326,8 +1326,8 @@ def run_task(task: dict, spend_tracker, task_queue):
 
     # Refill task queue if running low
     if task_queue.total_unblocked(projects=enabled_projects) < refill_threshold:
-        from task_generator import generate_tasks_all_projects       # lazy: circular dep
-        from dashboard_generator import generate as generate_dashboard  # lazy: convenience
+        from core.task_generator import generate_tasks_all_projects       # lazy: circular dep
+        from dashboard.generator import generate as generate_dashboard  # lazy: convenience
         generate_tasks_all_projects(
             task_queue       = task_queue,
             enabled_projects = enabled_projects,

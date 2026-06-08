@@ -48,7 +48,7 @@ ORCHESTRATOR = BASE_DIR.parent         # Orchestrator/
 
 sys.path.insert(0, str(ORCHESTRATOR))
 
-import notify
+import core.notify as notify
 from agents.commands import _parse_intent, _dispatch
 
 # ── PID GUARD — only one instance allowed ─────────────────────────────────────

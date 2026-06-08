@@ -8,7 +8,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from executor import ollama_generate
+from core.executor import ollama_generate
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ def generate_digest(period: str, task_queue, spend_tracker) -> str:
 
 
 def write_digest(period: str, task_queue, spend_tracker):
-    from dashboard_generator import generate as generate_dashboard
+    from dashboard.generator import generate as generate_dashboard
 
     digest      = generate_digest(period, task_queue, spend_tracker)
     pending     = list(_cfg("PENDING_DIR").glob("*.diff"))

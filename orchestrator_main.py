@@ -1,17 +1,16 @@
 """
 orchestrator_main.py
-Entry point and scheduler only. All logic lives in focused modules:
-  executor.py   — MiniMax execution, Ollama prompts, CONTEXT.md feedback loop
-  spend.py      — SpendTracker
-  digests.py    — digest generation
-  task_queue.py — SQLite task storage
-  task_generator.py — MiniMax council task generation
+Entry point and scheduler only. All logic lives in focused subpackages:
+  core/      — executor, task_queue, task_generator, notify, spend
+  analytics/ — digests, metrics, retro_generator, sprint_manager
+  dashboard/ — generator, server
+  pipeline/  — project-specific pipelines
 
 Before first run:
   1. export MINIMAX_API_KEY="..."
-  2. Set MiniMax spend cap at platform.minimax.io → Billing → $65
+  2. Set MiniMax spend cap at platform.minimax.io → Billing
   3. ollama list — verify qwen3-coder:30b and qwen3:14b are present
-  4. Enable lang only first (ENABLED_PROJECTS below), validate, then expand
+  4. Enable lang only first (ENABLED_PROJECTS in config.py), validate, then expand
 """
 
 import os
@@ -26,19 +25,19 @@ from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
-import executor
-import digests
-import notify
+import core.executor as executor
+import analytics.digests as digests
+import core.notify as notify
 from config      import (CFG, BASE_DIR, TASKS_DIR, PENDING_DIR, APPROVED_DIR,
                           LOGS_DIR, BACKUPS_DIR, DASHBOARD_DIR, PID_FILE, DB_PATH,
                           PROJECTS, ENABLED_PROJECTS, MINIMAX_SPEND_CAP, REPO_PATHS,
                           DASHBOARD_PORT, METRICS_INTERVAL_HOURS)
-from spend       import SpendTracker
-from task_queue  import TaskQueue
-from dashboard_generator import generate as generate_dashboard
-from task_generator      import generate_tasks_all_projects
-from pipeline.lang_pipeline import run_nightly as run_lang_nightly
-from retro_generator     import generate_retrospective
+from core.spend       import SpendTracker
+from core.task_queue  import TaskQueue
+from dashboard.generator     import generate as generate_dashboard
+from core.task_generator     import generate_tasks_all_projects
+from pipeline.lang_pipeline  import run_nightly as run_lang_nightly
+from analytics.retro_generator import generate_retrospective
 
 # ── LOGGING ───────────────────────────────────────────────────────────────────
 
@@ -260,7 +259,7 @@ def _run_lang_nightly_with_notify():
 scheduler.add_job(_run_lang_nightly_with_notify, "cron", hour=22, minute=0, id="lang_nightly")
 
 # Metrics snapshot to #orchestrator-metrics every N hours (default 10)
-from metrics import post_metrics_snapshot as _post_metrics
+from analytics.metrics import post_metrics_snapshot as _post_metrics
 scheduler.add_job(
     _post_metrics,
     "interval",

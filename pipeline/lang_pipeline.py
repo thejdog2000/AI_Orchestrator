@@ -389,7 +389,7 @@ def run_nightly():
         return
 
     # Spend cap check before burning tokens on a full nightly run
-    from spend import SpendTracker
+    from core.spend import SpendTracker
     st = SpendTracker(LOGS_DIR / "spend.json", MINIMAX_SPEND_CAP)
     if not st.check_caps():
         log.error("[lang] Spend cap reached — skipping nightly run")

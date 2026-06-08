@@ -72,3 +72,18 @@ ORCHESTRATOR_CONTEXT.textClipping
 orchestrator.db-journal
 orchestrator.db-wal
 orchestrator.db-shm
+
+# Runtime data
+data/
+dashboard/output/
+
+# macOS / FUSE artifacts
+.DS_Store
+.fuse_hidden*
+*.pid
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env.local

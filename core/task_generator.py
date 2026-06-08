@@ -28,8 +28,8 @@ import requests
 from datetime import datetime
 from pathlib import Path
 
-from task_queue import TaskQueue
-from executor   import load_context
+from core.task_queue import TaskQueue
+from core.executor   import load_context
 from config     import (
     MINIMAX_API_BASE, MINIMAX_MODEL, REPO_PATHS, BASE_DIR, DB_PATH,
     PERSPECTIVE_PROJECT_MAP, COUNCIL_TEMPERATURE,

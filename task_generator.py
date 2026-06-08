@@ -28,9 +28,12 @@ import requests
 from datetime import datetime
 from pathlib import Path
 
-from task_queue import TaskQueue, PERSPECTIVE_PROJECT_MAP
+from task_queue import TaskQueue
 from executor   import load_context
-from config     import MINIMAX_API_BASE, MINIMAX_MODEL, REPO_PATHS, BASE_DIR
+from config     import (
+    MINIMAX_API_BASE, MINIMAX_MODEL, REPO_PATHS, BASE_DIR,
+    PERSPECTIVE_PROJECT_MAP,
+)
 
 _personas_env = os.environ.get("ORCHESTRATOR_PERSONAS_DIR")
 PERSONAS_DIR  = Path(_personas_env) if _personas_env else BASE_DIR / "agents" / "personas" / "domain"
@@ -123,7 +126,7 @@ def _minimax_chat(
             "Content-Type":  "application/json",
         },
         json=payload,
-        timeout=60,
+        timeout=300,
     )
     resp.raise_for_status()
     data = resp.json()
@@ -408,5 +411,56 @@ def generate_tasks_all_projects(
         inserted = sum(1 for t in tasks if task_queue.add_task(t))
         log.info(f"[{project}] Inserted {inserted}/{len(tasks)} new tasks")
         total += inserted
+
+    return total
+
+
+# ── GAP-FILL ─────────────────────────────────────────────────────────────────
+
+def get_gap_fill_tasks() -> list[dict]:
+    """
+    Fallback tasks returned when the main queue runs dry.
+    These are safe, low-stakes tasks that are always valid to run.
+    Add entries here when a project needs a standing fallback.
+    """
+    import uuid
+    return [
+        {
+            "id":               f"gap_lang_{uuid.uuid4().hex[:8]}",
+            "project":          "lang",
+            "priority":         2,
+            "description":      "Expand randomization pools for any completed language scenes (add 5+ variants to each pool)",
+            "approval_required": False,
+            "complexity":       "low",
+            "rationale":        "More dialogue variety reduces repetition for learners",
+            "effort_category":  "gap-fill",
+            "perspective":      "speech_linguist",
+            "depends_on":       [],
+        },
+        {
+            "id":               f"gap_meridian_{uuid.uuid4().hex[:8]}",
+            "project":          "meridian",
+            "priority":         2,
+            "description":      "Generate JSDoc comments for all undocumented exported functions in meridian-mobile/src",
+            "approval_required": False,
+            "complexity":       "low",
+            "rationale":        "Improves context quality for subsequent tasks",
+            "effort_category":  "docs",
+            "perspective":      "engineering_architect",
+            "depends_on":       [],
+        },
+        {
+            "id":               f"gap_rts_{uuid.uuid4().hex[:8]}",
+            "project":          "rts",
+            "priority":         2,
+            "description":      "Generate XML summary comments for all public C# methods missing documentation",
+            "approval_required": False,
+            "complexity":       "low",
+            "rationale":        "Unity editor tooling uses XML docs for inspector tooltips",
+            "effort_category":  "docs",
+            "perspective":      "engineering_architect",
+            "depends_on":       [],
+        },
+    ]
 
     return total

@@ -7,10 +7,18 @@
 
 # Runtime state — regenerated on each run
 orchestrator.db
+orchestrator.db-shm
+orchestrator.db-wal
+orchestrator.db-journal
+orchestrator.pid
 logs/
-pending_review/*.diff
-pending_review/*.json
-dashboard/latest_digest.txt
+pending_review/
+dashboard/
+approved/
+backups/
+sprint_state.json
+pause_state.json
+CONTEXT_STALE
 
 # Python
 __pycache__/
@@ -24,9 +32,10 @@ build/
 .venv/
 venv/
 
-# macOS
+# macOS / sandbox artifacts
 .DS_Store
 .AppleDouble
+.fuse_hidden*
 
 # Editor
 .vscode/
@@ -41,8 +50,8 @@ node_modules/
 backups/
 approved/
 
-# Keep these — they're source of truth for task backlogs
-!tasks/*.json
+# tasks/ — keep lang_schedule.json (config), ignore generated/seed files
+tasks/orchestrator_review_tasks.json
 
 # git_watcher IPC — written by Claude, consumed by git_watcher.py on your Mac
 COMMIT_REQUEST.txt

@@ -151,6 +151,37 @@ def revise_execution_prompt(task: dict, context_md: str, evaluation: dict) -> st
     return result.strip() if result else write_execution_prompt(task, context_md)
 
 
+_NON_CODE_PATTERN = re.compile(
+    r'^diff --git a/(.+?) b/\1',
+    re.MULTILINE,
+)
+_NON_CODE_EXTENSIONS = re.compile(
+    r'\.(md|txt|rst|adoc|log|lock|gitignore|gitattributes|editorconfig|env\.example)$'
+    r'|/(TODO|CHANGELOG|CHANGES|LICENCE|LICENSE|NOTICE|AUTHORS|CONTRIBUTORS|CODEOWNERS)(\..*)?$',
+    re.IGNORECASE,
+)
+
+
+def _filter_non_code_hunks(diff_text: str) -> tuple[str, list[str]]:
+    """
+    Strip doc/config-only file sections from a git diff before quality gate evaluation.
+    Returns (filtered_diff, list_of_skipped_paths).
+
+    Prevents markdown/TODO rewrites at the top of a diff from consuming the
+    6000-char Ollama excerpt and triggering false 'prose instead of code' failures.
+    """
+    # Split on 'diff --git' boundaries, keeping the delimiter via a capture group
+    parts  = re.split(r'(?=^diff --git )', diff_text, flags=re.MULTILINE)
+    kept, skipped = [], []
+    for part in parts:
+        m = _NON_CODE_PATTERN.match(part)
+        if m and _NON_CODE_EXTENSIONS.search(m.group(1)):
+            skipped.append(m.group(1))
+        else:
+            kept.append(part)
+    return "".join(kept), skipped
+
+
 def evaluate_diff(diff_text: str, task: dict) -> dict:
     """
     Ollama quality gate for low/medium complexity diffs.
@@ -161,6 +192,9 @@ def evaluate_diff(diff_text: str, task: dict) -> dict:
     The gate is a sanity check (did MiniMax produce real code for this task?),
     NOT a semantic correctness review — it cannot verify logic on truncated diffs.
 
+    Non-code file hunks (*.md, TODO.*, lock files, etc.) are stripped before
+    the excerpt is taken so they don't crowd out actual code in the 6000-char window.
+
     Diff truncated to 6000 chars (~3000-4500 tokens), keeping total prompt
     well within qwen3-coder:30b's 8192-token context window.
     """
@@ -169,16 +203,24 @@ def evaluate_diff(diff_text: str, task: dict) -> dict:
         return {"score": 7, "pass": True, "issues": [], "reasoning": "High complexity — human review",
                 "gate_skipped": True}
 
-    shown   = min(len(diff_text), 6000)
-    total   = len(diff_text)
-    excerpt = diff_text[:6000]
+    filtered, skipped = _filter_non_code_hunks(diff_text)
+    if skipped:
+        log.info(f"[{task['project']}] Quality gate skipping non-code files: {skipped}")
 
+    # Fall back to full diff if filtering removed everything (pure-doc task)
+    eval_text = filtered if filtered.strip() else diff_text
+
+    shown   = min(len(eval_text), 6000)
+    total   = len(diff_text)           # report original total for context
+    excerpt = eval_text[:6000]
+
+    skip_note = f" — doc/config files excluded: {skipped}" if skipped else ""
     prompt = (
         f"Evaluate this code diff against the task specification.\n\n"
         f"Task: {task['description']}\n"
         f"Project: {task['project']}\n"
         f"Complexity: {task.get('complexity', 'medium')}\n\n"
-        f"Diff ({shown} of {total} chars):\n{excerpt}\n\n"
+        f"Diff ({shown} of {total} chars total{skip_note}):\n{excerpt}\n\n"
         f"Set pass=true only if ALL of the following are true:\n"
         f"- Diff contains actual code changes (not empty, not prose, not placeholder stubs)\n"
         f"- File paths match the project language and task scope\n"
@@ -319,13 +361,73 @@ def _minimax_chat(
         raise _MiniMaxTimeout(estimated_input_tokens)
 
     resp.raise_for_status()
-    data  = resp.json()
-    usage = data.get("usage", {})
+    data   = resp.json()
+    usage  = data.get("usage", {})
+    cached = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
     return (
         data["choices"][0]["message"]["content"],
         usage.get("prompt_tokens", 0),
         usage.get("completion_tokens", 0),
+        cached,
     )
+
+
+def select_relevant_files(task: dict, repo_path: Path, context_md: str, max_files: int = 12) -> list[str]:
+    """
+    Ask Ollama which files in the repo are most relevant to this task.
+    Uses git ls-files for an accurate, .gitignore-respecting file list.
+    Returns a list of relative paths to inject into the MiniMax user message.
+    """
+    try:
+        tree_result = subprocess.run(
+            ["git", "ls-files"],
+            cwd=repo_path, capture_output=True, text=True,
+        )
+        file_tree = tree_result.stdout.strip() if tree_result.returncode == 0 else ""
+    except Exception:
+        file_tree = ""
+
+    if not file_tree:
+        return []
+
+    prompt = (
+        f"List the {max_files} source files most relevant to this coding task.\n"
+        f"Return a JSON array of relative paths only. Example: [\"src/main.js\", \"utils/srs.js\"]\n"
+        f"Only include files that exist in the file tree below. Prioritise files that will need to be read or modified.\n\n"
+        f"TASK: {task['description']}\n"
+        f"CONTEXT:\n{context_md}\n\n"
+        f"FILE TREE:\n{file_tree[:3000]}\n\n"
+        f"JSON array:"
+    )
+    raw = ollama_generate(prompt, max_tokens=300, json_mode=True, temperature=0.1)
+    try:
+        paths = json.loads(raw)
+        return [p for p in paths if isinstance(p, str)][:max_files]
+    except Exception:
+        log.warning(f"[{task['project']}] select_relevant_files parse failed — no file context injected")
+        return []
+
+
+def _load_file_context(repo_path: Path, rel_paths: list[str], max_chars: int = 100_000) -> str:
+    """
+    Load content of the given files up to max_chars total.
+    Reads each file fully; truncates only the last file if the budget is hit.
+    """
+    parts = []
+    total = 0
+    for rel in rel_paths:
+        path = repo_path / rel
+        if not path.exists():
+            continue
+        content = path.read_text(errors="ignore")
+        remaining = max_chars - total
+        if len(content) > remaining:
+            content = content[:remaining]
+        parts.append(f"// {rel}\n{content}")
+        total += len(content)
+        if total >= max_chars:
+            break
+    return "\n\n".join(parts)
 
 
 def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
@@ -345,8 +447,19 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
     if not os.environ.get("MINIMAX_API_KEY"):
         return {"success": False, "error": "no_api_key"}
 
-    context_md = load_context(project, _cfg("REPO_PATHS"))
-    prompt     = system_prompt or write_execution_prompt(task, context_md)
+    context_md    = load_context(project, _cfg("REPO_PATHS"))
+    task_prompt   = system_prompt or write_execution_prompt(task, context_md)
+    relevant      = select_relevant_files(task, repo_path, context_md)
+    file_ctx      = _load_file_context(repo_path, relevant) if relevant else ""
+    if relevant:
+        log.info(f"[{project}] Injecting {len(relevant)} files into prompt: {relevant}")
+
+    # File context goes first in the system prompt so MiniMax's automatic prefix
+    # caching kicks in — same files across tasks for a project = cache hits at $0.06/M.
+    system = (
+        (f"EXISTING FILES (read carefully before modifying):\n\n{file_ctx}\n\n" if file_ctx else "")
+        + task_prompt
+    )
 
     user_msg = (
         f"Task: {task['description']}\n\n"
@@ -359,7 +472,7 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
 
     log.info(f"[{project}] Executing {task['id']} via MiniMax")
     try:
-        content, input_tokens, output_tokens = _minimax_chat(prompt, user_msg)
+        content, input_tokens, output_tokens, cached_tokens = _minimax_chat(system, user_msg)
     except EnvironmentError as e:
         return {"success": False, "error": str(e)}
     except requests.HTTPError as e:
@@ -401,7 +514,8 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
     diff_path   = pending_dir / f"{project}_{task['id']}_{int(time.time())}.diff"
     diff_path.write_text(diff_text or f"# No diff\n# Files: {list(file_blocks)}")
 
-    log.info(f"[{project}] {input_tokens} in / {output_tokens} out")
+    cache_note = f" | {cached_tokens} cached" if cached_tokens else ""
+    log.info(f"[{project}] {input_tokens} in / {output_tokens} out{cache_note}")
     return {
         "success":       True,
         "diff_path":     diff_path,
@@ -427,6 +541,15 @@ def _auto_commit(task: dict, repo_path: Path) -> str:
     if not repo_path or not repo_path.exists():
         log.error(f"[{task['project']}] Auto-commit skipped — repo_path invalid: {repo_path}")
         return ""
+
+    # Clear any stale git lock files before committing
+    git_dir = repo_path / ".git"
+    for lock in git_dir.glob("*.lock"):
+        try:
+            lock.unlink()
+            log.debug(f"[{task['project']}] Cleared stale git lock: {lock.name}")
+        except Exception:
+            pass
 
     project     = task["project"]
     description = task.get("description", "")[:60]

@@ -10,6 +10,7 @@ Update this file when:
   - Changing sprint phases / goals
 """
 
+import os
 from pathlib import Path
 
 # ── DIRECTORIES ───────────────────────────────────────────────────────────────
@@ -31,6 +32,37 @@ for _d in [TASKS_DIR, PENDING_DIR, APPROVED_DIR, LOGS_DIR, BACKUPS_DIR, DASHBOAR
 
 PROJECTS         = ["lang", "meridian", "rts", "gamma", "ninja", "tax"]
 ENABLED_PROJECTS = ["lang"]   # expand after validating pipeline per project
+
+# Which perspectives apply to which projects — used by task_generator council selection
+PERSPECTIVE_PROJECT_MAP = {
+    "engineering_architect": ["meridian", "rts", "lang", "gamma", "ninja", "tax"],
+    "security_engineer":     ["meridian", "tax"],
+    "qa_tester":             ["meridian", "rts", "lang", "gamma", "ninja"],
+    "product_manager":       ["meridian", "lang", "tax"],
+    "mobile_ux_designer":    ["meridian", "lang"],
+    "game_designer":         ["rts", "lang"],
+    "game_feel_engineer":    ["rts"],
+    "systems_architect":     ["rts", "gamma", "ninja"],
+    "speech_linguist":       ["lang"],
+    "pedagogy_expert":       ["lang"],
+    "quant_analyst":         ["gamma", "ninja"],
+    "risk_manager":          ["gamma", "ninja"],
+    "devops":                ["meridian", "tax"],
+    "it_administrator":      ["tax"],
+    "client_success":        ["tax"],
+}
+PERSPECTIVES      = list(PERSPECTIVE_PROJECT_MAP.keys())
+EFFORT_CATEGORIES = ["feature", "scaffold", "test", "docs", "bugfix", "gap-fill", "refactor"]
+COMPLEXITIES      = ["low", "medium", "high"]
+
+PROJECT_COLORS = {
+    "meridian": "#6366f1",
+    "rts":      "#f59e0b",
+    "lang":     "#10b981",
+    "gamma":    "#3b82f6",
+    "ninja":    "#8b5cf6",
+    "tax":      "#ef4444",
+}
 
 HOME = Path.home()
 
@@ -99,8 +131,8 @@ SPRINT_GOALS = {
 # DISCORD_CHANNEL_METRICS — new #orchestrator-metrics channel for FEAT-4 snapshots
 # METRICS_INTERVAL_HOURS  — how often to post metrics (default 10)
 
-DASHBOARD_PORT        = int(__import__("os").environ.get("DASHBOARD_PORT", "8080"))
-METRICS_INTERVAL_HOURS = int(__import__("os").environ.get("METRICS_INTERVAL_HOURS", "10"))
+DASHBOARD_PORT         = int(os.environ.get("DASHBOARD_PORT", "8080"))
+METRICS_INTERVAL_HOURS = int(os.environ.get("METRICS_INTERVAL_HOURS", "10"))
 
 # ── SHARED CFG DICT (passed to executor.configure, digests.configure) ─────────
 
@@ -112,6 +144,8 @@ CFG = {
     "DB_PATH":                DB_PATH,
     "PROJECTS":               PROJECTS,
     "ENABLED_PROJECTS":       ENABLED_PROJECTS,
+    "PERSPECTIVE_PROJECT_MAP": PERSPECTIVE_PROJECT_MAP,
+    "PROJECT_COLORS":         PROJECT_COLORS,
     "REPO_PATHS":             REPO_PATHS,
     "SPRINT_PHASES":          SPRINT_PHASES,
     "SPRINT_GOALS":           SPRINT_GOALS,

@@ -94,6 +94,16 @@ def execute_next_task():
     if not spend_tracker.check_caps():
         return
 
+    # Check pause_state.json written by Discord bot / CLI
+    _paused = set()
+    try:
+        import json as _json
+        _pf = BASE_DIR / "pause_state.json"
+        if _pf.exists():
+            _paused = set(_json.loads(_pf.read_text()).get("paused", []))
+    except Exception:
+        pass
+
     task    = None
     project = None
 
@@ -101,6 +111,8 @@ def execute_next_task():
     # from launching two tasks for the same project simultaneously.
     with _project_lock:
         for proj in ENABLED_PROJECTS:
+            if proj in _paused:
+                continue
             if _project_running.get(proj):
                 continue
             candidate = task_queue.get_next(projects=[proj])
@@ -112,6 +124,8 @@ def execute_next_task():
 
         if task is None:
             for proj in ENABLED_PROJECTS:
+                if proj in _paused:
+                    continue
                 if not _project_running.get(proj):
                     gaps = task_queue.get_gap_fill_tasks()
                     if gaps:

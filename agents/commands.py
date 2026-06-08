@@ -121,13 +121,13 @@ def _keyword_fallback(message: str) -> dict:
         return {"action": "status", "project": m.split()[1]}
     if m in ("spend", "cost", "how much"):
         return {"action": "spend"}
-    if m in ("blocked", "show blocked", "pending"):
+    if any(x in m for x in ("blocked", "pending", "review")):
         return {"action": "blocked"}
-    if m in ("queued", "queue", "what's queued"):
+    if any(x in m for x in ("queued", "queue", "what's queued", "tonight", "next up")):
         return {"action": "queued"}
-    if m in ("running", "what's running"):
+    if any(x in m for x in ("running", "what's running", "currently", "active")):
         return {"action": "running"}
-    if m in ("completed", "done today", "what did we build"):
+    if any(x in m for x in ("completed", "done today", "what did we build", "what was built", "what happened")):
         return {"action": "completed"}
     if m.startswith("pause "):
         return {"action": "pause", "project": m.split("pause ", 1)[1].strip()}
@@ -301,37 +301,40 @@ def _handle_running() -> str:
 
 
 def _handle_pause(project: str) -> str:
-    # Pause is implemented by removing the project from ENABLED_PROJECTS at runtime.
-    # For persistence across restarts, user must edit config.py.
-    # This in-process change lasts until orchestrator_main.py restarts.
+    # IPC via pause state file — orchestrator_main polls this every cycle.
+    # Works across separate processes (bot + orchestrator run independently).
+    import json as _json
+    pause_file = ORCHESTRATOR / "pause_state.json"
     try:
-        import orchestrator_main as om
-        if project == "all":
-            om.ENABLED_PROJECTS.clear()
-            return "⏸ All projects paused (until next restart). Edit config.py to make permanent."
-        if project in om.ENABLED_PROJECTS:
-            om.ENABLED_PROJECTS.remove(project)
-            return f"⏸ `{project}` paused. Edit config.py to make permanent."
-        return f"`{project}` was not in ENABLED_PROJECTS (already paused or invalid)."
-    except ImportError:
-        return "⚠️ Can't pause — orchestrator_main not running in this process. Start via orchestrator_main.py."
+        state = _json.loads(pause_file.read_text()) if pause_file.exists() else {"paused": []}
+        if project in ("all", "everything"):
+            from config import PROJECTS
+            state["paused"] = list(PROJECTS)
+            pause_file.write_text(_json.dumps(state, indent=2))
+            return "⏸ All projects paused. Send `resume all` to unpause."
+        if project not in state["paused"]:
+            state["paused"].append(project)
+        pause_file.write_text(_json.dumps(state, indent=2))
+        return f"⏸ `{project}` paused. Send `resume {project}` to unpause."
+    except Exception as e:
+        return f"⚠️ Pause failed: {e}"
 
 
 def _handle_resume(project: str) -> str:
+    import json as _json
+    pause_file = ORCHESTRATOR / "pause_state.json"
     try:
-        import orchestrator_main as om
-        from config import PROJECTS
-        if project == "all":
-            for p in PROJECTS:
-                if p not in om.ENABLED_PROJECTS:
-                    om.ENABLED_PROJECTS.append(p)
-            return f"▶️ All projects resumed: {', '.join(om.ENABLED_PROJECTS)}"
-        if project not in om.ENABLED_PROJECTS:
-            om.ENABLED_PROJECTS.append(project)
-            return f"▶️ `{project}` resumed."
-        return f"`{project}` is already running."
-    except ImportError:
-        return "⚠️ Can't resume — orchestrator_main not running in this process."
+        state = _json.loads(pause_file.read_text()) if pause_file.exists() else {"paused": []}
+        if project in ("all", "everything"):
+            state["paused"] = []
+            pause_file.write_text(_json.dumps(state, indent=2))
+            return "▶️ All projects resumed."
+        if project in state["paused"]:
+            state["paused"].remove(project)
+        pause_file.write_text(_json.dumps(state, indent=2))
+        return f"▶️ `{project}` resumed."
+    except Exception as e:
+        return f"⚠️ Resume failed: {e}"
 
 
 def _handle_help() -> str:
@@ -369,6 +372,12 @@ def _dispatch(intent: dict, raw_message: str) -> str:
     project = intent.get("project", "").strip().lower()
     target  = intent.get("target", "").strip()
     period  = intent.get("period", "morning")
+
+    # Normalize natural language "everything" → "all"
+    if project == "everything":
+        project = "all"
+    if target == "everything":
+        target = "all"
 
     if action == "status":
         return _handle_status(project or None)

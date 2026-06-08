@@ -29,6 +29,21 @@ DASHBOARD_DIR = Path(__file__).parent / "dashboard"
 OUTPUT_PATH   = DASHBOARD_DIR / "index.html"
 
 
+def _parse_diff_stats(diff_text: str) -> dict:
+    """Parse a unified diff into file count + line addition/deletion counts."""
+    if not diff_text:
+        return {"files": 0, "added": 0, "removed": 0}
+    files, added, removed = set(), 0, 0
+    for line in diff_text.splitlines():
+        if line.startswith("+++ ") and not line.startswith("+++ /dev/null"):
+            files.add(line[4:].strip())
+        elif line.startswith("+") and not line.startswith("+++"):
+            added += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            removed += 1
+    return {"files": len(files), "added": added, "removed": removed}
+
+
 def _load_all_tasks() -> list[dict]:
     if not DB_PATH.exists():
         return []
@@ -42,6 +57,29 @@ def _load_all_tasks() -> list[dict]:
         d["depends_on"]        = json.loads(d.get("depends_on") or "[]")
         d["blocks"]            = json.loads(d.get("blocks") or "[]")
         d["approval_required"] = bool(d.get("approval_required"))
+
+        # Parse diff stats from diff file if available
+        diff_path = d.get("diff_path")
+        diff_text = ""
+        if diff_path:
+            try:
+                diff_text = Path(diff_path).read_text()
+            except Exception:
+                pass
+        d["diff_stats"] = _parse_diff_stats(diff_text)
+
+        # Compute duration in seconds if start + end both recorded
+        try:
+            from datetime import datetime as dt
+            if d.get("started_at") and d.get("completed_at"):
+                s = dt.fromisoformat(d["started_at"])
+                e = dt.fromisoformat(d["completed_at"])
+                d["duration_sec"] = int((e - s).total_seconds())
+            else:
+                d["duration_sec"] = None
+        except Exception:
+            d["duration_sec"] = None
+
         result.append(d)
     return result
 
@@ -192,9 +230,63 @@ def generate() -> Path:
   .persp-bar-wrap {{ width: 80px; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }}
   .persp-bar {{ height: 100%; background: var(--blue); border-radius: 3px; }}
   .persp-pct {{ font-size: 11px; color: var(--muted); width: 35px; text-align: right; }}
+
+  /* ── MODAL ── */
+  .modal-overlay {{
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.65);
+    z-index: 100; align-items: flex-start; justify-content: center; padding: 40px 20px; overflow-y: auto;
+  }}
+  .modal-overlay.open {{ display: flex; }}
+  .modal {{
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    width: 100%; max-width: 780px; padding: 28px; position: relative;
+    box-shadow: 0 24px 80px rgba(0,0,0,.6);
+  }}
+  .modal-close {{
+    position: absolute; top: 16px; right: 18px; font-size: 20px; cursor: pointer;
+    color: var(--muted); background: none; border: none; line-height: 1;
+  }}
+  .modal-close:hover {{ color: var(--text); }}
+  .modal-id {{ font-size: 11px; color: var(--muted); margin-bottom: 6px; font-family: monospace; }}
+  .modal-title {{ font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 16px; line-height: 1.5; }}
+  .modal-section {{ margin-top: 20px; }}
+  .modal-section-label {{
+    font-size: 10px; text-transform: uppercase; letter-spacing: .6px;
+    color: var(--muted); margin-bottom: 8px; font-weight: 600;
+  }}
+  .modal-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }}
+  .modal-field {{ background: var(--surface2); border-radius: 8px; padding: 10px 12px; }}
+  .modal-field-label {{ font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 4px; }}
+  .modal-field-value {{ font-size: 12px; color: var(--text); font-weight: 500; word-break: break-all; }}
+  .modal-rationale {{
+    background: var(--surface2); border-radius: 8px; padding: 12px 14px;
+    font-size: 12px; color: var(--text); line-height: 1.6; border-left: 3px solid var(--blue);
+  }}
+  .diff-stats {{ display: flex; gap: 12px; align-items: center; }}
+  .diff-added {{ color: var(--green); font-size: 13px; font-weight: 600; font-family: monospace; }}
+  .diff-removed {{ color: var(--red); font-size: 13px; font-weight: 600; font-family: monospace; }}
+  .diff-files {{ color: var(--muted); font-size: 12px; }}
+  .modal-prompt {{
+    background: #0a0c14; border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px; font-family: monospace; font-size: 11px; color: #94a3b8;
+    white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto; line-height: 1.6;
+  }}
+  .modal-prompt-toggle {{
+    font-size: 11px; color: var(--blue); cursor: pointer; margin-bottom: 8px; display: inline-block;
+  }}
+  .card {{ cursor: pointer; }}
+  .card:hover {{ border-color: var(--blue); }}
 </style>
 </head>
 <body>
+
+<!-- ── MODAL ─────────────────────────────────────────────────────────────── -->
+<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div id="modalContent"></div>
+  </div>
+</div>
 
 <div class="header">
   <h1>⚙ Orchestrator</h1>
@@ -269,20 +361,22 @@ function card(t) {{
   const color = COLORS[t.project] || '#555';
   const rp    = t.review_priority || 3;
   const approvalBadge = t.approval_required ? badge('needs review', 'approval') : '';
+  const ds = t.diff_stats || {{}};
+  const diffHint = ds.files ? `${{ds.files}} file${{ds.files!==1?'s':''}} · +${{ds.added}} -${{ds.removed}}` : '';
   return `
-    <div class="card" title="${{t.rationale || ''}}">
+    <div class="card" onclick="openModal('${{t.id}}')" title="Click for details">
       <div class="card-top">
         <span class="project-dot" style="background:${{color}}"></span>
         <span class="card-desc truncated">${{t.description}}</span>
       </div>
       <div class="card-meta">
-        ${{badge(t.project, 'project', )}}
+        ${{badge(t.project, 'project')}}
         ${{badge((t.perspective||'').replace(/_/g,' '), 'perspective')}}
         ${{badge(t.complexity||'medium', 'complexity-' + (t.complexity||'medium'))}}
         ${{badge(t.effort_category||'feature', 'effort')}}
         ${{approvalBadge}}
+        ${{diffHint ? badge(diffHint, '') : ''}}
       </div>
-      ${{t.rationale ? `<div class="card-id" title="Rationale">${{t.rationale}}</div>` : ''}}
       <div class="review-bar" style="--rp:${{rp}}"></div>
       <div class="card-id">${{t.id}}</div>
     </div>`;
@@ -422,6 +516,130 @@ function renderMetrics() {{
     </div>
   `;
 }}
+
+render();
+
+// ── MODAL ─────────────────────────────────────────────────────────────────────
+
+const TASK_MAP = {{}};
+ALL_TASKS.forEach(t => TASK_MAP[t.id] = t);
+
+function field(label, value, wide) {{
+  if (value === null || value === undefined || value === '' || value === 0 && label !== 'Cost') return '';
+  return `<div class="modal-field${{wide ? '" style="grid-column:1/-1' : ''}}">
+    <div class="modal-field-label">${{label}}</div>
+    <div class="modal-field-value">${{value}}</div>
+  </div>`;
+}}
+
+function openModal(id) {{
+  const t = TASK_MAP[id];
+  if (!t) return;
+
+  const ds = t.diff_stats || {{}};
+  const diffBlock = ds.files ? `
+    <div class="modal-section">
+      <div class="modal-section-label">Diff</div>
+      <div class="diff-stats">
+        <span class="diff-files">${{ds.files}} file${{ds.files!==1?'s':''}} changed</span>
+        <span class="diff-added">+${{ds.added}}</span>
+        <span class="diff-removed">-${{ds.removed}}</span>
+      </div>
+    </div>` : '';
+
+  const dur = t.duration_sec != null
+    ? (t.duration_sec >= 60 ? `${{Math.floor(t.duration_sec/60)}}m ${{t.duration_sec%60}}s` : `${{t.duration_sec}}s`)
+    : null;
+
+  const statusColor = {{
+    completed:'var(--green)', failed:'var(--red)', running:'var(--blue)',
+    pending_review:'var(--yellow)', queued:'var(--muted)'
+  }}[t.status] || 'var(--muted)';
+
+  const promptBlock = t.system_prompt ? `
+    <div class="modal-section">
+      <div class="modal-section-label">
+        Execution Prompt
+        <span class="modal-prompt-toggle" onclick="togglePrompt(this)"> ▸ show</span>
+      </div>
+      <div class="modal-prompt" style="display:none">${{escHtml(t.system_prompt)}}</div>
+    </div>` : '';
+
+  const depBlock = (t.depends_on && t.depends_on.length) ? `
+    <div class="modal-section">
+      <div class="modal-section-label">Dependencies</div>
+      <div style="font-size:12px;color:var(--muted)">${{t.depends_on.join(', ')}}</div>
+    </div>` : '';
+
+  document.getElementById('modalContent').innerHTML = `
+    <div class="modal-id">${{t.id}}</div>
+    <div class="modal-title">${{t.description}}</div>
+
+    ${{t.rationale ? `<div class="modal-rationale">${{t.rationale}}</div>` : ''}}
+
+    <div class="modal-section">
+      <div class="modal-section-label">Details</div>
+      <div class="modal-grid">
+        ${{field('Status', `<span style="color:${{statusColor}};font-weight:600">${{t.status.replace(/_/g,' ')}}</span>`)}}
+        ${{field('Project', t.project)}}
+        ${{field('Perspective', (t.perspective||'').replace(/_/g,' '))}}
+        ${{field('Complexity', t.complexity)}}
+        ${{field('Category', t.effort_category)}}
+        ${{field('Priority', t.priority === 0 ? '🔴 P0' : t.priority === 1 ? '🟡 P1' : '⚪ P2')}}
+        ${{field('Review Priority', t.review_priority + '/5')}}
+        ${{field('Approval Required', t.approval_required ? '⚠️ Yes' : null)}}
+        ${{field('Quality Score', t.quality_score != null ? t.quality_score + '/10' : null)}}
+        ${{field('Gate Skipped', t.quality_gate_skipped ? '⚠️ Yes' : null)}}
+      </div>
+    </div>
+
+    <div class="modal-section">
+      <div class="modal-section-label">Timing & Cost</div>
+      <div class="modal-grid">
+        ${{field('Created', (t.created_at||'').slice(0,16))}}
+        ${{field('Started', (t.started_at||'').slice(0,16))}}
+        ${{field('Completed', (t.completed_at||'').slice(0,16))}}
+        ${{field('Duration', dur)}}
+        ${{field('Cost', t.cost_usd ? '$' + t.cost_usd.toFixed(5) : null)}}
+        ${{field('Tokens In', t.actual_tokens ? t.actual_tokens.toLocaleString() : null)}}
+        ${{field('Model', t.model_used)}}
+        ${{field('Commit', t.commit_hash ? t.commit_hash.slice(0,7) : null)}}
+      </div>
+    </div>
+
+    ${{diffBlock}}
+
+    ${{t.rejection_reason ? `
+    <div class="modal-section">
+      <div class="modal-section-label">Rejection / Notes</div>
+      <div style="font-size:12px;color:var(--red);background:var(--surface2);padding:10px;border-radius:8px">${{t.rejection_reason}}</div>
+    </div>` : ''}}
+
+    ${{depBlock}}
+    ${{promptBlock}}
+  `;
+
+  document.getElementById('modalOverlay').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}}
+
+function closeModal() {{
+  document.getElementById('modalOverlay').classList.remove('open');
+  document.body.style.overflow = '';
+}}
+
+function togglePrompt(el) {{
+  const pre = el.parentElement.nextElementSibling;
+  const hidden = pre.style.display === 'none';
+  pre.style.display = hidden ? 'block' : 'none';
+  el.textContent = hidden ? ' ▾ hide' : ' ▸ show';
+}}
+
+function escHtml(s) {{
+  return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}}
+
+document.addEventListener('keydown', e => {{ if (e.key === 'Escape') closeModal(); }});
 
 render();
 </script>

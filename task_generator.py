@@ -31,7 +31,7 @@ from pathlib import Path
 from task_queue import TaskQueue
 from executor   import load_context
 from config     import (
-    MINIMAX_API_BASE, MINIMAX_MODEL, REPO_PATHS, BASE_DIR,
+    MINIMAX_API_BASE, MINIMAX_MODEL, REPO_PATHS, BASE_DIR, DB_PATH,
     PERSPECTIVE_PROJECT_MAP,
 )
 
@@ -177,6 +177,47 @@ def _format_task_list(tasks: list) -> str:
     return "\n".join(f"- {t['description']}" for t in tasks[:10])
 
 
+def _load_active_pbis(project: str) -> list:
+    """Load active PBIs for this project with their queued task summaries."""
+    try:
+        tq = TaskQueue(DB_PATH)
+        epics = tq.all_epics(project=project)
+        result = []
+        for epic in epics:
+            for pbi in tq.pbis_for_epic(epic["id"]):
+                if pbi["status"] != "active":
+                    continue
+                prog  = tq.pbi_progress(pbi["id"])
+                tasks = tq.tasks_for_pbi(pbi["id"])
+                queued_descs = [t["description"] for t in tasks if t["status"] == "queued"]
+                result.append({
+                    "epic":       epic["name"],
+                    "pbi_id":     pbi["id"],
+                    "title":      pbi["title"],
+                    "queued":     prog.get("queued", 0),
+                    "completed":  prog.get("completed", 0),
+                    "total":      prog.get("total", 0),
+                    "task_descs": queued_descs,
+                })
+        return result
+    except Exception as e:
+        log.warning(f"[{project}] Could not load PBIs: {e}")
+        return []
+
+
+def _format_pbi_summary(pbis: list) -> str:
+    """Render active PBIs as a concise block for prompt injection."""
+    if not pbis:
+        return "None — all work is in the flat task queue."
+    lines = []
+    for p in pbis:
+        prog = f"{p['completed']}/{p['total']} tasks done"
+        lines.append(f"  [{p['epic']}] {p['title']} ({prog})")
+        for desc in p["task_descs"][:3]:
+            lines.append(f"    • {desc[:80]}")
+    return "\n".join(lines)
+
+
 # ── PERSPECTIVE CALL ──────────────────────────────────────────────────────────
 
 def _call_perspective(
@@ -188,6 +229,7 @@ def _call_perspective(
     completed_summary: str,
     pending_summary:   str,
     phase_note:        str,
+    pbi_summary:       str = "",
 ) -> str:
     """
     One MiniMax call per perspective.
@@ -217,12 +259,21 @@ Completed this week:
 Pending review (already in progress — do NOT re-propose):
 {pending_summary}
 
+Active PBIs (multi-task features already planned — do NOT propose tasks covered by these):
+{pbi_summary or 'None.'}
+
 ---
+TASK SCOPING RULES:
+- Each task must touch at most 3-8 files. If it needs more, it belongs in a PBI — do not propose it.
+- Propose only tasks NOT already covered by an active PBI above.
+- Prefer tasks that are independently runnable (no implicit prerequisite not yet done).
+- If two tasks are naturally sequential, propose only the first one — the second becomes a depends_on task once the first is done.
+
 As a {perspective.replace('_', ' ')}, propose exactly 3 tasks.
-Each task must be a single actionable sentence scoped to the current sprint phase.
+Each task must be a single actionable sentence naming the specific files or components involved.
 
 Use this exact format for each task (no deviations):
-TASK: <one sentence>
+TASK: <one sentence naming files/components>
 COMPLEXITY: low|medium|high
 EFFORT: feature|scaffold|test|docs|bugfix|gap-fill|refactor
 APPROVAL_REQUIRED: yes|no
@@ -247,6 +298,7 @@ def _merge_and_extract(
     project:      str,
     proposals:    dict,   # {perspective_name: raw_proposal_text}
     target_count: int = 8,
+    pbi_summary:  str = "",
 ) -> list:
     """
     Final MiniMax call with json_mode=True.
@@ -265,25 +317,32 @@ def _merge_and_extract(
 
     user = f"""Project: {project}
 
+Active PBIs (multi-file features already planned with their own task queues — exclude any task covered by these):
+{pbi_summary or 'None.'}
+
 Advisor proposals:
 {proposals_block}
 
 ---
 Select the {target_count} most valuable tasks. Rules:
-1. Deduplicate: merge similar tasks, keep the better-scoped description
-2. Balance effort categories — do not return all features with no tests
-3. Prefer tasks with clear, measurable scope over vague ones
-4. Preserve the perspective field from whichever advisor proposed the best version
+1. Exclude any task whose scope is covered by an active PBI listed above
+2. Deduplicate: merge similar tasks, keep the better-scoped description
+3. Balance effort categories — do not return all features with no tests
+4. Prefer tasks that name specific files or components — reject vague tasks
+5. Each task should touch at most 3-8 files — reject anything broader
+6. If two tasks are sequential, set depends_on on the second task using the first task's temporary index (0-based)
+7. Preserve the perspective field from whichever advisor proposed the best version
 
 Output a JSON object with key "tasks" — an array of objects each containing:
-  description       (string)  — one actionable sentence
-  complexity        (string)  — "low", "medium", or "high"
-  effort_category   (string)  — "feature", "scaffold", "test", "docs", "bugfix", "gap-fill", or "refactor"
-  perspective       (string)  — advisor perspective that proposed this task
-  rationale         (string)  — one sentence why this matters
-  priority          (integer) — 0=critical-path, 1=standard, 2=nice-to-have
-  approval_required (boolean) — true only for auth/security/user-data/client-deploy tasks
-  estimated_tokens  (integer) — scaffold:15000, feature:10000, test:6000, docs:4000, bugfix:8000, gap-fill:3000"""
+  description       (string)   — one actionable sentence naming specific files/components
+  complexity        (string)   — "low", "medium", or "high"
+  effort_category   (string)   — "feature", "scaffold", "test", "docs", "bugfix", "gap-fill", or "refactor"
+  perspective       (string)   — advisor perspective that proposed this task
+  rationale         (string)   — one sentence why this matters
+  priority          (integer)  — 0=critical-path, 1=standard, 2=nice-to-have
+  approval_required (boolean)  — true only for auth/security/user-data/client-deploy tasks
+  estimated_tokens  (integer)  — scaffold:15000, feature:10000, test:6000, docs:4000, bugfix:8000, gap-fill:3000
+  depends_on        (array)    — list of task IDs this depends on; use [] if none (IDs assigned after merge)"""
 
     raw   = _minimax_chat(
         messages=[
@@ -330,9 +389,21 @@ def generate_tasks_for_project(
     completed_tasks = completed_tasks or []
     pending_tasks   = pending_tasks   or []
 
-    context_summary    = _load_context(project)
-    completed_summary  = _format_task_list(completed_tasks[-10:]) if completed_tasks else "Nothing completed yet."
-    pending_summary    = _format_task_list(pending_tasks[:10])    if pending_tasks   else "No pending review items."
+    context_summary   = _load_context(project)
+    completed_summary = _format_task_list(completed_tasks[-10:]) if completed_tasks else "Nothing completed yet."
+
+    # Load active PBIs — council must not re-propose tasks already covered by them
+    active_pbis  = _load_active_pbis(project)
+    pbi_summary  = _format_pbi_summary(active_pbis)
+
+    # Pending summary includes both review items AND queued PBI tasks so council
+    # sees the full picture of in-flight work and doesn't duplicate it
+    pbi_tasks       = [{"description": d} for p in active_pbis for d in p["task_descs"]]
+    all_pending     = (pending_tasks or []) + pbi_tasks
+    pending_summary = _format_task_list(all_pending[:15]) if all_pending else "No pending items."
+
+    if active_pbis:
+        log.info(f"[{project}] {len(active_pbis)} active PBIs injected into council context")
 
     phase_config = PHASE_WEIGHTS.get(sprint_phase, PHASE_WEIGHTS["feature"])
     phase_note   = (
@@ -358,6 +429,7 @@ def generate_tasks_for_project(
                 completed_summary = completed_summary,
                 pending_summary   = pending_summary,
                 phase_note        = phase_note,
+                pbi_summary       = pbi_summary,
             )
         except Exception as e:
             log.error(f"[{project}] {perspective} call failed: {e}")
@@ -368,7 +440,7 @@ def generate_tasks_for_project(
 
     log.info(f"[{project}] Merging {len(proposals)} proposals → {target_count} tasks")
     try:
-        tasks = _merge_and_extract(project, proposals, target_count=target_count)
+        tasks = _merge_and_extract(project, proposals, target_count=target_count, pbi_summary=pbi_summary)
         log.info(f"[{project}] Generated {len(tasks)} tasks")
         return tasks
     except (json.JSONDecodeError, KeyError) as e:

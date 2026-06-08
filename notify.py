@@ -162,6 +162,22 @@ def task_failed(task: dict, error: str, attempts: int) -> bool:
     return post("live", msg)
 
 
+def pbi_ready_for_review(task: dict, pbi: dict, pr_url: str = "") -> bool:
+    """Post to #live and #blocked when all tasks in a PBI are complete."""
+    branch  = f"pbi/{pbi['id']}"
+    project = task.get("project", "?")
+    review_link = pr_url if pr_url else f"branch `{branch}`"
+    msg = (
+        f"✅  **[{project}]** PBI complete — ready to review\n"
+        f"    **{pbi['title']}**\n"
+        f"    {review_link}"
+    )
+    post("live", msg)
+    detail = f"**PR:** {pr_url}\n**PBI:** {pbi['title']}" if pr_url \
+             else f"**Branch:** `{branch}`\n**PBI:** {pbi['title']}"
+    return blocked_embed(task, reason="pbi_review_ready", detail=detail)
+
+
 def task_blocked_on_question(task: dict, question: str) -> bool:
     """Post to #live and #blocked when a model asks a clarifying question."""
     desc = task.get("description", "")[:60]
@@ -192,6 +208,7 @@ def blocked_embed(task: dict, reason: str, detail: str = "", blocked_since: str 
         "quality_gate_failed": _COLOR_ORANGE,
         "repeated_failure":    _COLOR_ORANGE,
         "model_question":      _COLOR_ORANGE,
+        "pbi_review_ready":    _COLOR_GREEN,
     }
     color = color_map.get(reason, _COLOR_RED)
 
@@ -200,6 +217,7 @@ def blocked_embed(task: dict, reason: str, detail: str = "", blocked_since: str 
         "quality_gate_failed": "⚠️ QUALITY GATE FAILED",
         "repeated_failure":    "⚠️ REPEATED FAILURE",
         "model_question":      "❓ MODEL NEEDS CLARIFICATION",
+        "pbi_review_ready":    "✅ PBI READY TO MERGE",
     }
     title = title_map.get(reason, "🔴 BLOCKED")
 

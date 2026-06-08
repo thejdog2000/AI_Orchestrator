@@ -71,7 +71,7 @@ HOME = Path.home()
 REPO_PATHS: dict[str, Path] = {
     "lang":     HOME / "Documents/Claude/Projects/Language Learning App",
     "gamma":    HOME / "Documents/claude/projects/gamma-tool",
-    "meridian": HOME / "projects/meridian-mobile",
+    "meridian": HOME / "projects/fashionApp",
     "rts":      HOME / "projects/ironhold-rts",
     "ninja":    HOME / "projects/ninjatrader-algos",
     "tax":      HOME / "projects/tax-cloud-tools",
@@ -81,7 +81,7 @@ REPO_PATHS: dict[str, Path] = {
 
 MINIMAX_API_BASE  = "https://api.minimax.io/v1"
 MINIMAX_MODEL     = "MiniMax-M3"       # verify at platform.minimax.io before first run
-MINIMAX_SPEND_CAP = 35.0               # USD/month hard cap
+MINIMAX_SPEND_CAP = 50.0               # USD/month hard cap
 
 OLLAMA_BASE         = "http://localhost:11434"
 OLLAMA_MODEL_CODE   = "qwen3-coder:30b"   # execution prompts, quality gate

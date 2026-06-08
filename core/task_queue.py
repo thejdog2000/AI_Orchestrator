@@ -513,12 +513,15 @@ class TaskQueue:
 
     # ── METRICS ──────────────────────────────────────────────────────────────
 
-    def metrics_data(self, days: int = 30) -> dict:
+    def metrics_data(self, days: int = 30, spend_log_path=None) -> dict:
         """
         Return all data needed for the metrics dashboard.
-        Covers: pass rate, cost, throughput, perspective performance, queue health.
+        Cost figures come from SpendTracker (single source of truth — includes
+        timeouts/partial spends the DB never sees). DB used for attribution
+        ratios (which project/perspective generated what share of cost).
         """
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        cutoff_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
         with self._conn() as conn:
             gate_rows = conn.execute("""
@@ -527,6 +530,7 @@ class TaskQueue:
                 WHERE created_at >= ? AND status IN ('completed', 'failed')
             """, (cutoff,)).fetchall()
 
+            # DB cost rows — used for per-project RATIO only, not absolute totals
             cost_rows = conn.execute("""
                 SELECT project, SUM(cost_usd) as total, COUNT(*) as n
                 FROM tasks
@@ -563,6 +567,37 @@ class TaskQueue:
                 ORDER BY completed_at DESC LIMIT 10
             """).fetchall()
 
+        # ── SpendTracker cost (single source of truth) ───────────────────────
+        spend_total   = 0.0
+        spend_daily   = {}
+        spend_wasted  = 0.0
+        try:
+            from pathlib import Path as _P
+            _log = spend_log_path or (_P(__file__).parent.parent / "data" / "logs" / "spend.json")
+            if _P(_log).exists():
+                _data = json.loads(_P(_log).read_text())
+                spend_daily = {
+                    k: v["usd"] for k, v in _data.get("daily", {}).items()
+                    if k >= cutoff_date
+                }
+                spend_total  = sum(spend_daily.values())
+                spend_wasted = sum(
+                    e.get("est_usd", 0) for e in _data.get("partial_events", [])
+                    if (e.get("date") or "") >= cutoff_date
+                )
+        except Exception:
+            pass
+
+        # Distribute SpendTracker total across projects using DB cost ratios
+        db_total = sum(r["total"] or 0 for r in cost_rows)
+        cost_by_project = {}
+        for r in cost_rows:
+            ratio = (r["total"] or 0) / db_total if db_total else 0
+            cost_by_project[r["project"]] = {
+                "total": round(spend_total * ratio, 4),
+                "n":     r["n"],
+            }
+
         gate_total  = len(gate_rows)
         gate_passed = sum(1 for r in gate_rows if r["quality_score"] and r["quality_score"] >= 6)
         gate_rate   = round(gate_passed / gate_total * 100, 1) if gate_total else 0.0
@@ -573,10 +608,10 @@ class TaskQueue:
                 "passed":    gate_passed,
                 "total":     gate_total,
             },
-            "cost_by_project": {
-                r["project"]: {"total": round(r["total"] or 0, 4), "n": r["n"]}
-                for r in cost_rows
-            },
+            "cost_by_project":  cost_by_project,
+            "spend_total":      round(spend_total, 4),   # SpendTracker total for period
+            "spend_wasted":     round(spend_wasted, 4),  # timeouts/retries
+            "spend_by_day":     spend_daily,             # for trend line
             "throughput_by_day": {r["day"]: r["n"] for r in throughput_rows if r["day"]},
             "perspectives": [
                 {

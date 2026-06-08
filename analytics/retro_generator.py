@@ -362,13 +362,44 @@ def cleanup_pipeline_logs(keep_days: int = 7):
         log.warning(f"Pipeline log cleanup failed: {e}")
 
 
-def generate_retrospective(hours: int = 24) -> dict:
+def _window_since_last_retro() -> tuple[str, str]:
     """
-    Generate and save a retrospective covering the last `hours` of activity.
+    Return (start_iso, end_iso) covering from the last retro's end time to now.
+    Falls back to 24h if no prior retro exists.
+    This gives a rolling window rather than a fixed midnight-to-midnight window,
+    so the dashboard always reflects the most recent activity period.
+    """
+    end = datetime.now()
+    if RETROS_DIR.exists():
+        files = sorted(RETROS_DIR.glob("*.json"), reverse=True)
+        for f in files:
+            try:
+                data = json.loads(f.read_text())
+                last_end = data.get("period", {}).get("end")
+                if last_end:
+                    start = datetime.fromisoformat(last_end)
+                    # If last retro ended more than 48h ago, cap at 48h to avoid huge windows
+                    if (end - start).total_seconds() > 172800:
+                        start = end - timedelta(hours=48)
+                    return start.isoformat(), end.isoformat()
+            except Exception:
+                continue
+    # No prior retro — default to last 24h
+    return (end - timedelta(hours=24)).isoformat(), end.isoformat()
+
+
+def generate_retrospective(hours: int = None) -> dict:
+    """
+    Generate and save a retrospective.
+    If hours is None (default), covers from the last retro's end to now — rolling window.
+    If hours is specified, covers exactly that many hours back from now.
     Returns the retro dict (also written to retros/YYYY-MM-DD.json).
     """
-    date  = datetime.now().strftime("%Y-%m-%d")
-    start, end = _query_window(hours)
+    date = datetime.now().strftime("%Y-%m-%d")
+    if hours is not None:
+        start, end = _query_window(hours)
+    else:
+        start, end = _window_since_last_retro()
 
     log.info(f"Generating retrospective for {date} ({hours}h window)")
 

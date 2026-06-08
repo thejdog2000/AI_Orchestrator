@@ -362,14 +362,29 @@ Output a JSON object with key "tasks" — an array of objects each containing:
     data  = json.loads(raw)
     tasks = data.get("tasks", [])
 
-    # Stamp required fields
-    ts = int(time.time())
+    # Stamp required fields — assign IDs first so depends_on can reference them
+    ts       = int(time.time())
+    id_map   = {}   # temp 0-based index → real task ID
     for i, t in enumerate(tasks):
-        t["project"]    = project
-        t["id"]         = f"{project}_{ts}_{i:03d}"
-        t["status"]     = "queued"
-        t.setdefault("depends_on", [])
-        t.setdefault("blocks",     [])
+        t["project"] = project
+        t["id"]      = f"{project}_{ts}_{i:03d}"
+        t["status"]  = "queued"
+        id_map[i]    = t["id"]
+
+    # Resolve depends_on: MiniMax may return 0-based integer indexes or real IDs
+    for t in tasks:
+        raw_deps = t.get("depends_on", [])
+        if not isinstance(raw_deps, list):
+            raw_deps = []
+        resolved = []
+        for dep in raw_deps:
+            if isinstance(dep, int) and dep in id_map:
+                resolved.append(id_map[dep])   # integer index → real ID
+            elif isinstance(dep, str) and dep:
+                resolved.append(dep)            # already a string ID — keep as-is
+            # drop anything else (None, out-of-range index, etc.)
+        t["depends_on"] = resolved
+        t.setdefault("blocks", [])
 
     return tasks
 

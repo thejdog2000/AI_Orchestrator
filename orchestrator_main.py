@@ -284,7 +284,7 @@ if __name__ == "__main__":
         log.warning("Ollama unavailable — execution prompts will fall back to raw task descriptions")
 
     # Start dashboard server in background thread
-    from dashboard_server import start_background as start_dashboard
+    from dashboard.server import start_background as start_dashboard
     start_dashboard(port=DASHBOARD_PORT)
 
     # Notify Discord that the orchestrator is online

@@ -293,7 +293,9 @@ if __name__ == "__main__":
     if task_queue.total_unblocked(projects=ENABLED_PROJECTS) == 0:
         _seed_sample_tasks()
 
-    log.info(f"Queue: {task_queue.stats()}")
+    _stats = task_queue.stats()
+    _stats.pop("total_cost_usd", None)   # misleading — use SpendTracker for cost
+    log.info(f"Queue: {_stats} | Monthly spend: ${spend_tracker.monthly_spend():.2f}")
     generate_dashboard()
 
     try:

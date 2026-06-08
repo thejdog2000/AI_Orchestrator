@@ -503,14 +503,13 @@ class TaskQueue:
         return [_row_to_dict(r) for r in rows]
 
     def stats(self) -> dict:
+        """Task status counts only. Use SpendTracker for cost — it's the single
+        source of truth and includes timeouts/partial spends the DB never sees."""
         with self._conn() as conn:
             rows = conn.execute("""
                 SELECT status, COUNT(*) as n FROM tasks GROUP BY status
             """).fetchall()
-            cost = conn.execute(
-                "SELECT COALESCE(SUM(cost_usd), 0) FROM tasks"
-            ).fetchone()[0]
-        return {r["status"]: r["n"] for r in rows} | {"total_cost_usd": round(cost, 4)}
+        return {r["status"]: r["n"] for r in rows}
 
     # ── METRICS ──────────────────────────────────────────────────────────────
 

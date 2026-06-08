@@ -400,22 +400,30 @@ def select_relevant_files(task: dict, repo_path: Path, context_md: str, max_file
         f"JSON array:"
     )
     raw = ollama_generate(prompt, max_tokens=300, json_mode=True, temperature=0.1)
-    # Strip qwen3 thinking blocks before JSON parse
+    # Strip qwen3 thinking blocks
     if "</think>" in raw:
         raw = raw.split("</think>", 1)[-1].strip()
+    # Extract a JSON array from anywhere in the response — Ollama sometimes wraps it in prose
+    import re as _re
+    paths = []
     try:
         paths = json.loads(raw)
-        # Validate each path actually exists in the repo — reject placeholder strings
-        valid = [
-            p for p in paths
-            if isinstance(p, str) and (repo_path / p).exists()
-        ][:max_files]
-        if not valid and paths:
-            log.warning(f"[{task['project']}] select_relevant_files returned no valid paths: {paths[:5]}")
-        return valid
     except Exception:
+        # Try to find a JSON array anywhere in the response
+        m = _re.search(r'\[.*?\]', raw, _re.DOTALL)
+        if m:
+            try:
+                paths = json.loads(m.group())
+            except Exception:
+                pass
+    if not paths:
         log.warning(f"[{task['project']}] select_relevant_files parse failed — no file context injected")
         return []
+    # Validate each path actually exists in the repo
+    valid = [p for p in paths if isinstance(p, str) and (repo_path / p).exists()][:max_files]
+    if not valid:
+        log.warning(f"[{task['project']}] select_relevant_files returned no valid paths: {paths[:5]}")
+    return valid
 
 
 def _load_file_context(repo_path: Path, rel_paths: list[str], max_chars: int = 100_000) -> str:
@@ -502,7 +510,14 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
     if not file_blocks:
         preview = content[:500]
         log.warning(f"[{project}] No file blocks for {task['id']}. Preview: {preview[:300]}")
-        return {"success": False, "error": "no_file_blocks", "response_preview": preview}
+        return {
+            "success":         False,
+            "error":           "no_file_blocks",
+            "response_preview": preview,
+            "input_tokens":    input_tokens,
+            "output_tokens":   output_tokens,
+            "cached_tokens":   cached_tokens,
+        }
 
     written = []
     for rel_path, file_content in file_blocks.items():
@@ -636,6 +651,16 @@ def run_task(task: dict, spend_tracker, task_queue):
         if result["success"]:
             break
 
+        # Record spend for this failed attempt — MiniMax bills all API calls,
+        # including ones that returned no file blocks or produced bad output.
+        if result.get("input_tokens") or result.get("output_tokens"):
+            spend_tracker.record(
+                project,
+                result.get("input_tokens", 0),
+                result.get("output_tokens", 0),
+                _cfg("MINIMAX_MODEL"),
+            )
+
         wait = backoff[min(attempt, len(backoff) - 1)]
         log.warning(f"[{project}] Attempt {attempt + 1} failed: {result.get('error')}. "
                     f"Retrying in {wait}s...")
@@ -723,11 +748,16 @@ def run_task(task: dict, spend_tracker, task_queue):
     if result.get("diff_text") and repo_path:
         update_context_md(task, result["diff_text"], repo_path)
 
-    # ── AUTO-COMMIT or APPROVAL QUEUE ────────────────────────────────────────
+    # ── AUTO-COMMIT ───────────────────────────────────────────────────────────
+    # approval_required tasks land in failed so they surface for review on the
+    # dashboard — the diff is saved and the system prompt is stored for context.
     if task.get("approval_required"):
-        # Send to pending_review — Jacob must approve before commit
-        task_queue.mark_pending_review(task, result["diff_path"])
-        log.info(f"[{project}] {task['id']} → pending_review (approval_required)")
+        task_queue.mark_failed(task, notes="needs approval — review diff before committing")
+        task_queue.update_status(task["id"], "failed",
+                                 diff_path=str(result["diff_path"]),
+                                 quality_score=evaluation.get("score", 0),
+                                 system_prompt=result.get("system_prompt", "")[:2000])
+        log.info(f"[{project}] {task['id']} → failed (approval_required — diff saved for review)")
         _notify().task_pending_review(task)
     else:
         # Auto-commit: git add -A + git commit

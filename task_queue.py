@@ -304,6 +304,16 @@ class TaskQueue:
             """).fetchall()
         return [_row_to_dict(r) for r in rows]
 
+    def get_gap_fill_tasks(self) -> list[dict]:
+        """Return simple gap-fill tasks when the main queue is empty."""
+        with self._conn() as conn:
+            rows = conn.execute("""
+                SELECT * FROM tasks
+                WHERE status = 'queued' AND effort_category = 'gap-fill'
+                ORDER BY priority ASC LIMIT 3
+            """).fetchall()
+        return [_row_to_dict(r) for r in rows]
+
     def get_completed_today(self) -> list[dict]:
         today = datetime.now().strftime("%Y-%m-%d")
         with self._conn() as conn:

@@ -65,6 +65,7 @@ Supported actions and their required fields:
   {"action": "pause", "project": "lang"}          — pause a project
   {"action": "pause", "project": "all"}           — pause everything
   {"action": "resume", "project": "lang"}         — resume a project
+  {"action": "requeue", "target": "task_id"}      — reset a failed task back to queued
   {"action": "running"}                           — what's running right now
   {"action": "completed"}                         — what was completed today
   {"action": "help"}                              — show available commands
@@ -133,6 +134,9 @@ def _keyword_fallback(message: str) -> dict:
         return {"action": "pause", "project": m.split("pause ", 1)[1].strip()}
     if m.startswith("resume "):
         return {"action": "resume", "project": m.split("resume ", 1)[1].strip()}
+    if m.startswith("requeue ") or m.startswith("retry "):
+        task_id = m.split(" ", 1)[1].strip()
+        return {"action": "requeue", "target": task_id}
     if m in ("help", "?", "commands"):
         return {"action": "help"}
     return {"action": "unknown"}
@@ -300,6 +304,31 @@ def _handle_running() -> str:
     return "\n".join(lines)
 
 
+def _handle_requeue(target: str) -> str:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row  = conn.execute("SELECT * FROM tasks WHERE id=?", (target,)).fetchone()
+    conn.close()
+
+    if not row:
+        return f"❌ Task `{target}` not found."
+
+    task = dict(row)
+    if task["status"] == "queued":
+        return f"Task `{target}` is already queued."
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE tasks SET status='queued', notes=NULL, rejection_reason=NULL WHERE id=?",
+        (target,),
+    )
+    conn.commit()
+    conn.close()
+
+    notify.post("live", f"🔁  **[{task['project']}]** Task requeued: `{target}`")
+    return f"🔁 Requeued `{target}` — [{task['project']}] {task['description'][:60]}"
+
+
 def _handle_pause(project: str) -> str:
     # IPC via pause state file — orchestrator_main polls this every cycle.
     # Works across separate processes (bot + orchestrator run independently).
@@ -354,6 +383,7 @@ def _handle_help() -> str:
   `approve all lang`                         — bulk approve all lang tasks
   `approve everything` / `approve all`       — approve all pending (caution!)
   `reject lang_001`                          — reject task, mark failed
+  `requeue lang_003`                         — reset a failed task back to queued
 
 **Control**
   `pause lang` / `pause everything`          — stop project from running
@@ -399,6 +429,10 @@ def _dispatch(intent: dict, raw_message: str) -> str:
         return _handle_completed()
     elif action == "running":
         return _handle_running()
+    elif action == "requeue":
+        if not target:
+            return "Usage: `requeue <task_id>`"
+        return _handle_requeue(target)
     elif action == "pause":
         return _handle_pause(project or "all")
     elif action == "resume":

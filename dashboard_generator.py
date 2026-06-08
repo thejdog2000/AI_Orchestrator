@@ -109,6 +109,7 @@ def _load_all_tasks() -> list[dict]:
         d["quality_reasoning"] = ""
         d["quality_issues"]    = []
         d["response_preview"]  = ""
+        d["thinking_preview"]  = ""
         d["attempts"]          = None
         d["injected_files"]    = []
         if d.get("status") == "failed":
@@ -121,6 +122,7 @@ def _load_all_tasks() -> list[dict]:
                         d["quality_reasoning"] = ev.get("reasoning", "")
                         d["quality_issues"]    = ev.get("issues", [])
                         d["response_preview"]  = detail.get("response_preview", "")
+                        d["thinking_preview"]  = detail.get("thinking_preview", "")
                         d["attempts"]          = detail.get("attempts")
                         d["injected_files"]    = detail.get("injected_files", [])
                     except Exception:
@@ -129,6 +131,27 @@ def _load_all_tasks() -> list[dict]:
 
         result.append(d)
     return result
+
+
+def _load_epics_pbis() -> tuple[list, list]:
+    """Load all epics and PBIs with task progress counts."""
+    if not DB_PATH.exists():
+        return [], []
+    try:
+        from task_queue import TaskQueue
+        tq     = TaskQueue()
+        epics  = tq.all_epics()
+        pbis   = []
+        for epic in epics:
+            for pbi in tq.pbis_for_epic(epic["id"]):
+                prog = tq.pbi_progress(pbi["id"])
+                pbi["progress"] = prog
+                pbi["epic_name"]  = epic["name"]
+                pbi["epic_color"] = epic.get("color", "#6366f1")
+                pbis.append(pbi)
+        return epics, pbis
+    except Exception:
+        return [], []
 
 
 def generate() -> Path:
@@ -140,11 +163,23 @@ def generate() -> Path:
 
     retros       = load_all_retros()
     real_spend   = _load_real_spend()
+    epics, pbis  = _load_epics_pbis()
+
+    # Build pbi lookup for task cards: pbi_id → {title, epic_name, epic_color}
+    pbi_lookup = {p["id"]: p for p in pbis}
+
     tasks_json   = json.dumps(tasks, default=str)
     colors_json  = json.dumps(PROJECT_COLORS)
     metrics_json = json.dumps(metrics, default=str)
     retros_json  = json.dumps(retros, default=str)
     spend_json   = json.dumps(real_spend)
+    epics_json   = json.dumps(epics, default=str)
+    pbis_json    = json.dumps(pbis, default=str)
+    pbi_lookup_json = json.dumps(
+        {pid: {"title": p["title"], "epic_name": p["epic_name"], "epic_color": p["epic_color"]}
+         for pid, p in pbi_lookup.items()},
+        default=str
+    )
 
     # Pre-computed to avoid backslashes inside f-string expressions (Python 3.9 compat)
     project_pills = " ".join(
@@ -219,51 +254,45 @@ def generate() -> Path:
   .stat span {{ color: var(--text); font-weight: 600; font-size: 13px; }}
 
   /* ── SWIMLANE BOARD ── */
-  .board {{
-    display: grid;
-    grid-template-columns: 100px repeat(5, 1fr);
-    gap: 0;
-    padding: 0 20px 20px;
-    min-height: calc(100vh - 160px);
-    overflow-x: auto;
+  .board {{ overflow-x: auto; padding: 0 20px 20px; }}
+  .swim-header-row, .swim-row {{
+    display: flex; min-width: 900px;
   }}
-  /* Status header row */
-  .board-col-header {{
-    position: sticky; top: 0; z-index: 10;
-    background: var(--bg); padding: 10px 8px 8px;
+  .swim-project-corner {{
+    width: 90px; flex-shrink: 0; padding: 8px 8px 8px 0;
     font-size: 10px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: .6px; color: var(--muted);
+    letter-spacing: .5px; color: var(--muted);
+    border-bottom: 2px solid var(--border);
+  }}
+  .swim-status-header {{
+    flex: 1; min-width: 160px; padding: 8px;
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .5px; color: var(--muted);
+    border-bottom: 2px solid var(--border);
+    border-left: 1px solid var(--border);
     display: flex; align-items: center; gap: 6px;
-    border-bottom: 1px solid var(--border);
   }}
-  .board-col-header.first {{ border-right: 1px solid var(--border); }}
-  .board-col-header .col-dot {{
-    width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  .swim-project-label {{
+    width: 90px; flex-shrink: 0;
+    padding: 8px 8px 8px 0; border-bottom: 1px solid var(--border);
+    display: flex; align-items: flex-start; padding-top: 10px;
+    font-size: 11px; font-weight: 700; color: var(--text);
+    gap: 6px;
   }}
-  /* Project label cells */
-  .project-label {{
-    position: sticky; left: 0; z-index: 5;
-    background: var(--bg); border-right: 1px solid var(--border);
-    border-bottom: 1px solid var(--border);
-    padding: 10px 8px; display: flex; align-items: flex-start;
-    padding-top: 12px;
-  }}
-  .project-label-inner {{
-    writing-mode: horizontal-tb;
-    font-size: 11px; font-weight: 700; letter-spacing: .4px;
-    color: var(--text); display: flex; align-items: center; gap: 6px;
-  }}
-  .project-dot-label {{
-    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
-  }}
-  /* Task cells */
   .swim-cell {{
+    flex: 1; min-width: 160px;
     padding: 6px; border-bottom: 1px solid var(--border);
-    border-right: 1px solid var(--border);
+    border-left: 1px solid var(--border);
     display: flex; flex-direction: column; gap: 5px;
-    min-height: 60px; background: var(--bg);
+    min-height: 56px;
   }}
-  .swim-cell.empty {{ background: var(--bg); }}
+  .cell-more-btn {{
+    font-size: 10px; color: var(--blue); cursor: pointer;
+    padding: 3px 6px; text-align: center;
+    border: 1px dashed var(--border); border-radius: 4px;
+    margin-top: 2px;
+  }}
+  .cell-more-btn:hover {{ background: var(--surface2); }}
   /* Column (kept for backward compat with card styles) */
   .column {{
     flex: 1 1 0; min-width: 0; background: var(--surface); border-radius: 10px;
@@ -309,6 +338,50 @@ def generate() -> Path:
     clip-path: inset(0 calc(100% - (var(--rp) / 5 * 100%)) 0 0 round 2px);
   }}
   .card-id {{ font-size: 10px; color: var(--muted); margin-top: 4px; }}
+  .epic-chip {{
+    display: inline-block; font-size: 9px; font-weight: 600; letter-spacing: .4px;
+    text-transform: uppercase; padding: 1px 6px; border-radius: 999px;
+    border: 1px solid; margin-bottom: 4px; cursor: pointer; opacity: .85;
+  }}
+  .epic-chip:hover {{ opacity: 1; }}
+  /* ── PBI INDEX ── */
+  .pbi-epic-group {{ margin-bottom: 20px; }}
+  .pbi-epic-header {{
+    font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px;
+    padding: 4px 8px; border-radius: 4px; margin-bottom: 8px; display: flex;
+    align-items: center; gap: 6px;
+  }}
+  .pbi-row {{
+    padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border);
+    margin-bottom: 6px; cursor: pointer; transition: border-color .15s;
+  }}
+  .pbi-row:hover {{ border-color: var(--blue); }}
+  .pbi-row.active {{ border-color: var(--blue); background: var(--surface2); }}
+  .pbi-row-title {{ font-size: 12px; font-weight: 500; margin-bottom: 4px; }}
+  .pbi-progress-bar {{
+    height: 3px; border-radius: 2px; background: var(--border); overflow: hidden; margin-top: 5px;
+  }}
+  .pbi-progress-fill {{ height: 100%; background: var(--green); border-radius: 2px; }}
+  .pbi-progress-label {{ font-size: 10px; color: var(--muted); margin-top: 3px; }}
+  /* ── PBI DETAIL ── */
+  .pbi-detail-title {{ font-size: 16px; font-weight: 600; margin-bottom: 8px; }}
+  .pbi-detail-section {{ margin-top: 20px; }}
+  .pbi-detail-section h4 {{ font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin-bottom: 8px; }}
+  .pbi-detail-body {{ font-size: 13px; line-height: 1.6; color: var(--text); white-space: pre-wrap; }}
+  .pbi-file-chip {{
+    display: inline-block; font-size: 10px; font-family: monospace;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 4px; padding: 2px 6px; margin: 2px;
+  }}
+  .pbi-task-row {{
+    display: flex; align-items: center; gap: 8px; padding: 6px 0;
+    border-bottom: 1px solid var(--border); font-size: 12px;
+  }}
+  .pbi-task-status {{
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  }}
+  .pbi-sibling {{ font-size: 11px; color: var(--muted); cursor: pointer; padding: 3px 0; }}
+  .pbi-sibling:hover {{ color: var(--text); }}
 
   /* ── EMPTY ── */
   .empty {{ text-align: center; padding: 40px 20px; color: var(--muted); font-size: 12px; }}
@@ -397,6 +470,32 @@ def generate() -> Path:
   .retro-task-note {{ font-size: 11px; color: var(--red); margin-top: 3px; font-family: monospace; }}
   .retro-empty {{ color: var(--muted); font-size: 13px; padding: 16px 0; }}
 
+  /* ── PIPELINE SECTION ── */
+  .pipeline-attempt {{
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 10px;
+    margin-bottom: 16px; overflow: hidden;
+  }}
+  .pipeline-attempt-header {{
+    padding: 12px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+  }}
+  .pipeline-attempt-header:hover {{ background: var(--surface); }}
+  .pipeline-attempt-body {{ padding: 14px 16px; display: none; }}
+  .pipeline-attempt-body.open {{ display: block; }}
+  .pipeline-file-list {{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }}
+  .pipeline-file-chip {{
+    font-family: monospace; font-size: 11px; padding: 2px 8px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 4px;
+    color: var(--muted);
+  }}
+  .pipeline-file-chip.written {{ color: var(--green); border-color: var(--green); }}
+  .diff-hunk {{ font-family: monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }}
+  .diff-add {{ color: var(--green); }}
+  .diff-remove {{ color: var(--red); }}
+  .diff-meta {{ color: var(--blue); }}
+  .diff-header {{ color: var(--muted); }}
+
   /* ── MODAL ── */
   .modal-overlay {{
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,.7);
@@ -462,6 +561,7 @@ def generate() -> Path:
 
 <div class="tabs">
   <div class="tab active" onclick="switchTab('kanban',this)">📋 Kanban</div>
+  <div class="tab" onclick="switchTab('pbis',this)">🗂 PBIs</div>
   <div class="tab" onclick="switchTab('metrics',this)">📊 Metrics</div>
   <div class="tab" onclick="switchTab('retros',this)">🔁 Retros</div>
 </div>
@@ -494,6 +594,15 @@ def generate() -> Path:
 <div class="board" id="board"></div>
 </div><!-- end tab-kanban -->
 
+<div id="tab-pbis" class="tab-content">
+  <div id="pbi-layout" style="display:flex;height:calc(100vh - 120px);overflow:hidden">
+    <div id="pbi-index" style="width:340px;min-width:260px;border-right:1px solid var(--border);overflow-y:auto;padding:16px;flex-shrink:0"></div>
+    <div id="pbi-detail" style="flex:1;overflow-y:auto;padding:24px">
+      <div style="color:var(--muted);padding-top:60px;text-align:center">Select a PBI to view details</div>
+    </div>
+  </div>
+</div>
+
 <div id="tab-metrics" class="tab-content">
   <div class="metrics-grid" id="metricsGrid"></div>
 </div>
@@ -513,6 +622,9 @@ const COLORS      = {colors_json};
 const METRICS     = {metrics_json};
 const ALL_RETROS  = {retros_json};
 const REAL_SPEND  = {spend_json};
+const ALL_EPICS   = {epics_json};
+const ALL_PBIS    = {pbis_json};
+const PBI_LOOKUP  = {pbi_lookup_json};
 const COLUMNS     = [
   {{ key: 'queued',    label: 'Queued',                dot: '#94a3b8' }},
   {{ key: 'running',   label: 'Running',               dot: '#3b82f6' }},
@@ -568,12 +680,19 @@ function card(t) {{
   const approvalBadge = t.approval_required ? badge('needs review', 'approval') : '';
   const ds = t.diff_stats || {{}};
   const diffHint = ds.files ? `${{ds.files}} file${{ds.files!==1?'s':''}} · +${{ds.added}} -${{ds.removed}}` : '';
+  const pbi = t.pbi_id ? PBI_LOOKUP[t.pbi_id] : null;
+  const epicBadge = pbi
+    ? `<span class="epic-chip" style="border-color:${{pbi.epic_color}};color:${{pbi.epic_color}}"
+         onclick="event.stopPropagation();openPbi('${{t.pbi_id}}')"
+         title="PBI: ${{pbi.title}}">${{pbi.epic_name}}</span>`
+    : '';
   return `
     <div class="card" onclick="openModal('${{t.id}}')" title="Click for details">
       <div class="card-top">
         <span class="project-dot" style="background:${{color}}"></span>
         <span class="card-desc truncated">${{t.description}}</span>
       </div>
+      ${{epicBadge}}
       <div class="card-meta">
         ${{badge(t.project, 'project')}}
         ${{badge((t.perspective||'').replace(/_/g,' '), 'perspective')}}
@@ -600,51 +719,67 @@ function render() {{
     .join('');
 
   // ── SWIMLANE LAYOUT ───────────────────────────────────────────────────────
-  // Row per project, column per status. Header row first.
-
   const projects = [...new Set(ALL_TASKS.map(t => t.project))].sort();
 
-  // Header row: empty corner + status column headers
+  // Header row
+  const headerRow = document.createElement('div');
+  headerRow.className = 'swim-header-row';
   const corner = document.createElement('div');
-  corner.className = 'board-col-header first';
+  corner.className = 'swim-project-corner';
   corner.textContent = 'Project';
-  board.appendChild(corner);
-
+  headerRow.appendChild(corner);
   COLUMNS.forEach(col => {{
     const hdr = document.createElement('div');
-    hdr.className = 'board-col-header';
+    hdr.className = 'swim-status-header';
     const colCount = visible.filter(t => t.status === col.key).length;
-    hdr.innerHTML = `<span class="col-dot" style="background:${{col.dot}}"></span>${{col.label}} <span class="count" style="margin-left:4px">${{colCount}}</span>`;
-    board.appendChild(hdr);
+    hdr.innerHTML = `<span style="width:7px;height:7px;border-radius:50%;background:${{col.dot}};display:inline-block;flex-shrink:0"></span>${{col.label}}&nbsp;<span class="count">${{colCount}}</span>`;
+    headerRow.appendChild(hdr);
   }});
+  board.appendChild(headerRow);
 
-  // One row per project
+  // One flex row per project
   projects.forEach(proj => {{
     const color = COLORS[proj] || '#555';
+    const row = document.createElement('div');
+    row.className = 'swim-row';
 
-    // Project label cell
     const lbl = document.createElement('div');
-    lbl.className = 'project-label';
-    lbl.innerHTML = `<div class="project-label-inner">
-      <span class="project-dot-label" style="background:${{color}}"></span>
-      ${{proj}}
-    </div>`;
-    board.appendChild(lbl);
+    lbl.className = 'swim-project-label';
+    lbl.innerHTML = `<span style="width:8px;height:8px;border-radius:50%;background:${{color}};display:inline-block;flex-shrink:0;margin-top:2px"></span>${{proj}}`;
+    row.appendChild(lbl);
 
-    // One cell per status column
     COLUMNS.forEach(col => {{
       const cell = document.createElement('div');
       cell.className = 'swim-cell';
       const cellTasks = visible.filter(t => t.project === proj && t.status === col.key);
-
-      if (cellTasks.length === 0) {{
-        cell.classList.add('empty');
-      }} else {{
-        cell.innerHTML = cellTasks.map(card).join('');
+      const cap = 3;
+      if (cellTasks.length > 0) {{
+        const shown  = cellTasks.slice(0, cap);
+        const hidden = cellTasks.slice(cap);
+        const cellId = `cell-${{proj}}-${{col.key}}`;
+        cell.innerHTML = shown.map(card).join('');
+        if (hidden.length > 0) {{
+          cell.innerHTML += `
+            <div id="${{cellId}}-more" style="display:none">${{hidden.map(card).join('')}}</div>
+            <div class="cell-more-btn" onclick="toggleCellMore('${{cellId}}',this)">
+              +${{hidden.length}} more
+            </div>`;
+        }}
       }}
-      board.appendChild(cell);
+      row.appendChild(cell);
     }});
+
+    board.appendChild(row);
   }});
+}}
+
+function toggleCellMore(cellId, btn) {{
+  const more = document.getElementById(cellId + '-more');
+  const open = more.style.display === 'none';
+  more.style.display = open ? 'flex' : 'none';
+  more.style.flexDirection = 'column';
+  more.style.gap = '5px';
+  btn.textContent = open ? '▾ show less' : '+' + more.children.length + ' more';
 }}
 
 function toggleCompleted() {{
@@ -652,6 +787,99 @@ function toggleCompleted() {{
   const toggle = body.previousElementSibling;
   const hidden = body.classList.toggle('hidden');
   toggle.textContent = hidden ? '▸ Show completed' : '▾ Hide completed';
+}}
+
+// ── PBI INDEX + DETAIL ───────────────────────────────────────────────────────
+
+const STATUS_DOT = {{
+  completed: 'var(--green)', queued: 'var(--muted)',
+  running: 'var(--blue)', failed: 'var(--red)',
+}};
+
+function renderPbiIndex() {{
+  const index = document.getElementById('pbi-index');
+  if (!ALL_EPICS.length) {{
+    index.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:20px 0">No epics yet.<br>Create one to get started.</div>';
+    return;
+  }}
+  index.innerHTML = ALL_EPICS.map(epic => {{
+    const epicPbis = ALL_PBIS.filter(p => p.epic_id === epic.id);
+    const rows = epicPbis.map(pbi => {{
+      const prog  = pbi.progress || {{}};
+      const done  = prog.completed || 0;
+      const total = prog.total || 0;
+      const pct   = total ? Math.round(done / total * 100) : 0;
+      const statusColor = done === total && total > 0 ? 'var(--green)' : 'var(--border)';
+      return `<div class="pbi-row" id="pbi-row-${{pbi.id}}" onclick="openPbi('${{pbi.id}}')">
+        <div class="pbi-row-title">${{pbi.title}}</div>
+        <div class="pbi-progress-bar"><div class="pbi-progress-fill" style="width:${{pct}}%"></div></div>
+        <div class="pbi-progress-label">${{done}}/${{total}} tasks · ${{pct}}%</div>
+      </div>`;
+    }}).join('') || '<div style="color:var(--muted);font-size:11px;padding:4px 0">No PBIs yet</div>';
+
+    const epicDone  = epicPbis.filter(p => (p.progress||{{}}).completed === (p.progress||{{}}).total && (p.progress||{{}}).total > 0).length;
+    return `<div class="pbi-epic-group">
+      <div class="pbi-epic-header" style="background:${{epic.color}}22;color:${{epic.color}}">
+        <span style="width:8px;height:8px;border-radius:50%;background:${{epic.color}};display:inline-block;flex-shrink:0"></span>
+        ${{epic.name}}
+        <span style="margin-left:auto;font-weight:400;font-size:10px">${{epicDone}}/${{epicPbis.length}}</span>
+      </div>
+      ${{rows}}
+    </div>`;
+  }}).join('');
+}}
+
+function openPbi(pbiId) {{
+  // Highlight selected row
+  document.querySelectorAll('.pbi-row').forEach(r => r.classList.remove('active'));
+  const row = document.getElementById('pbi-row-' + pbiId);
+  if (row) row.classList.add('active');
+
+  const pbi   = ALL_PBIS.find(p => p.id === pbiId);
+  if (!pbi) return;
+
+  const tasks  = ALL_TASKS.filter(t => t.pbi_id === pbiId);
+  const siblings = ALL_PBIS.filter(p => p.epic_id === pbi.epic_id && p.id !== pbiId);
+
+  const fileChips = (pbi.affected_files || [])
+    .map(f => `<span class="pbi-file-chip">${{f}}</span>`).join('') || '<span style="color:var(--muted)">None specified</span>';
+
+  const taskRows = tasks.length
+    ? tasks.map(t => `
+        <div class="pbi-task-row">
+          <span class="pbi-task-status" style="background:${{STATUS_DOT[t.status]||'var(--muted)'}}"></span>
+          <span style="flex:1">${{t.description.slice(0,80)}}${{t.description.length>80?'…':''}}</span>
+          <span style="font-size:10px;color:var(--muted)">${{t.id}}</span>
+          <span style="font-size:10px;color:var(--muted)">${{t.status}}</span>
+        </div>`).join('')
+    : '<div style="color:var(--muted);font-size:12px">No tasks linked yet</div>';
+
+  const siblingLinks = siblings.length
+    ? siblings.map(s => `<div class="pbi-sibling" onclick="openPbi('${{s.id}}')" title="${{s.title}}">↳ ${{s.title}}</div>`).join('')
+    : '<div style="color:var(--muted);font-size:11px">No siblings</div>';
+
+  document.getElementById('pbi-detail').innerHTML = `
+    <div style="font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:${{pbi.epic_color}};margin-bottom:6px">
+      ${{pbi.epic_name}}
+    </div>
+    <div class="pbi-detail-title">${{pbi.title}}</div>
+    <span style="font-size:10px;color:var(--muted)">${{pbi.id}} · ${{pbi.status}}</span>
+
+    ${{pbi.description ? `<div class="pbi-detail-section"><h4>Description</h4><div class="pbi-detail-body">${{pbi.description}}</div></div>` : ''}}
+    ${{pbi.acceptance_criteria ? `<div class="pbi-detail-section"><h4>Acceptance Criteria</h4><div class="pbi-detail-body">${{pbi.acceptance_criteria}}</div></div>` : ''}}
+
+    <div class="pbi-detail-section">
+      <h4>Affected Files</h4>
+      <div>${{fileChips}}</div>
+    </div>
+
+    <div class="pbi-detail-section">
+      <h4>Tasks (${{tasks.length}})</h4>
+      ${{taskRows}}
+    </div>
+
+    ${{siblings.length ? `<div class="pbi-detail-section"><h4>Siblings under "${{pbi.epic_name}}"</h4>${{siblingLinks}}</div>` : ''}}
+  `;
 }}
 
 // ── TAB SWITCHING ────────────────────────────────────────────────────────────
@@ -663,6 +891,7 @@ function switchTab(name, el) {{
   document.getElementById('tab-' + name).classList.add('active');
   if (name === 'metrics') renderMetrics();
   if (name === 'retros')  initRetros();
+  if (name === 'pbis')    renderPbiIndex();
 }}
 
 // ── METRICS RENDERING ────────────────────────────────────────────────────────
@@ -876,8 +1105,12 @@ function openModal(id) {{
           <div class="modal-field-label">Files Injected as Context</div>
           <div class="modal-field-value" style="font-family:monospace;font-size:13px;font-weight:400;line-height:1.8">${{files.join('<br>')}}</div>
         </div>` : ''}}
-        ${{preview ? `<div style="margin-top:12px">
-          <div class="modal-field-label" style="margin-bottom:6px">MiniMax Response Preview</div>
+        ${{t.thinking_preview ? `<div style="margin-top:12px">
+          <div class="modal-field-label" style="margin-bottom:6px">MiniMax Reasoning (think block)</div>
+          <div class="modal-prompt" style="border-color:#6366f1">${{escHtml(t.thinking_preview)}}</div>
+        </div>` : ''}}
+        ${{preview && preview !== t.thinking_preview ? `<div style="margin-top:12px">
+          <div class="modal-field-label" style="margin-bottom:6px">MiniMax Output Preview</div>
           <div class="modal-prompt">${{escHtml(preview)}}</div>
         </div>` : ''}}
       </div>`;
@@ -885,10 +1118,140 @@ function openModal(id) {{
 
     ${{depBlock}}
     ${{promptBlock}}
+
+    <div class="modal-section">
+      <div class="modal-section-label">🔬 Pipeline</div>
+      <div id="pipelineSection"></div>
+    </div>
   `;
 
   document.getElementById('modalOverlay').classList.add('open');
   document.body.style.overflow = 'hidden';
+
+  // Fetch full pipeline log lazily — only loads when the modal opens
+  fetchPipelineData(id);
+}}
+
+function fetchPipelineData(taskId) {{
+  const container = document.getElementById('pipelineSection');
+  if (!container) return;
+  container.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px 0">Loading pipeline data...</div>';
+
+  fetch(`/pipeline/${{taskId}}`)
+    .then(r => r.ok ? r.json() : null)
+    .then(data => {{
+      if (!data || !data.attempts) {{
+        container.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px 0">No pipeline log yet — available after next run.</div>';
+        return;
+      }}
+      renderPipeline(container, data);
+    }})
+    .catch(() => {{
+      container.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px 0">Pipeline log unavailable (server not running?).</div>';
+    }});
+}}
+
+function renderPipeline(container, data) {{
+  const attempts = data.attempts || [];
+  const diffPath = data.diff_path || '';
+  const diffFile = diffPath ? diffPath.split('/').pop() : '';
+
+  const attemptsHtml = attempts.map((a, i) => {{
+    const statusColor = a.error ? 'var(--red)' : 'var(--green)';
+    const statusLabel = a.error ? `❌ ${{a.error}}` : '✅ success';
+    const cacheNote   = a.cached_tokens ? ` · ${{a.cached_tokens}} cached` : '';
+    const tokenNote   = `${{(a.input_tokens||0).toLocaleString()}} in / ${{(a.output_tokens||0).toLocaleString()}} out${{cacheNote}}`;
+
+    const injectedHtml = (a.injected_files||[]).length
+      ? `<div style="margin-bottom:10px">
+          <div class="modal-field-label" style="margin-bottom:5px">Files injected as context</div>
+          <div class="pipeline-file-list">${{(a.injected_files).map(f => `<span class="pipeline-file-chip">${{escHtml(f)}}</span>`).join('')}}</div>
+        </div>`
+      : '';
+
+    const writtenHtml = (a.files_written||[]).length
+      ? `<div style="margin-bottom:10px">
+          <div class="modal-field-label" style="margin-bottom:5px">Files written</div>
+          <div class="pipeline-file-list">${{(a.files_written).map(f => `<span class="pipeline-file-chip written">${{escHtml(f)}}</span>`).join('')}}</div>
+        </div>`
+      : '';
+
+    const promptHtml = a.ollama_prompt
+      ? `<div style="margin-bottom:10px">
+          <div class="modal-field-label" style="margin-bottom:5px">Ollama system prompt</div>
+          <div class="modal-prompt">${{escHtml(a.ollama_prompt)}}</div>
+        </div>`
+      : '';
+
+    const thinkHtml = a.thinking_block
+      ? `<div style="margin-bottom:10px">
+          <div class="modal-field-label" style="margin-bottom:5px">Reasoning (${{a.thinking_block.length}} chars)</div>
+          <div class="modal-prompt" style="border-color:#6366f1;max-height:300px">${{escHtml(a.thinking_block)}}</div>
+        </div>`
+      : '';
+
+    const outputHtml = a.output_content
+      ? `<div style="margin-bottom:10px">
+          <div class="modal-field-label" style="margin-bottom:5px">MiniMax output (${{a.output_content.length}} chars)</div>
+          <div class="modal-prompt" style="max-height:400px">${{escHtml(a.output_content)}}</div>
+        </div>`
+      : '';
+
+    return `<div class="pipeline-attempt">
+      <div class="pipeline-attempt-header" onclick="toggleAttempt(this)">
+        <span>Attempt ${{a.attempt}} — <span style="color:${{statusColor}}">${{statusLabel}}</span></span>
+        <span style="color:var(--muted);font-size:11px">${{tokenNote}} ▾</span>
+      </div>
+      <div class="pipeline-attempt-body ${{i === attempts.length - 1 ? 'open' : ''}}">
+        ${{injectedHtml}}${{writtenHtml}}${{promptHtml}}${{thinkHtml}}${{outputHtml}}
+      </div>
+    </div>`;
+  }}).join('');
+
+  const diffSectionHtml = diffFile
+    ? `<div class="retro-section" style="margin-top:24px">
+        <div class="retro-section-title">📄 Full Diff
+          <span id="diffToggle" style="color:var(--blue);cursor:pointer;font-size:11px;font-weight:normal;margin-left:8px" onclick="loadDiff('${{escHtml(diffFile)}}')">▸ load diff</span>
+        </div>
+        <div id="diffContent" style="display:none"></div>
+      </div>`
+    : '';
+
+  container.innerHTML = attemptsHtml + diffSectionHtml;
+}}
+
+function toggleAttempt(header) {{
+  const body = header.nextElementSibling;
+  const open = body.classList.toggle('open');
+  header.querySelector('span:last-child').textContent =
+    header.querySelector('span:last-child').textContent.replace(open ? '▸' : '▾', open ? '▾' : '▸');
+}}
+
+function loadDiff(diffFile) {{
+  const toggle  = document.getElementById('diffToggle');
+  const content = document.getElementById('diffContent');
+  if (content.style.display !== 'none') {{
+    content.style.display = 'none';
+    toggle.textContent = '▸ load diff';
+    return;
+  }}
+  toggle.textContent = 'loading...';
+  fetch(`/diff/${{diffFile}}`)
+    .then(r => r.ok ? r.text() : 'Diff not available')
+    .then(text => {{
+      const lines = text.split('\\n').map(l => {{
+        if (l.startsWith('+') && !l.startsWith('+++')) return `<span class="diff-add">${{escHtml(l)}}</span>`;
+        if (l.startsWith('-') && !l.startsWith('---')) return `<span class="diff-remove">${{escHtml(l)}}</span>`;
+        if (l.startsWith('@@'))  return `<span class="diff-meta">${{escHtml(l)}}</span>`;
+        if (l.startsWith('diff') || l.startsWith('index') || l.startsWith('+++') || l.startsWith('---'))
+          return `<span class="diff-header">${{escHtml(l)}}</span>`;
+        return escHtml(l);
+      }});
+      content.innerHTML = `<div class="modal-prompt diff-hunk" style="max-height:500px">${{lines.join('\\n')}}</div>`;
+      content.style.display = 'block';
+      toggle.textContent = '▾ hide diff';
+    }})
+    .catch(() => {{ content.textContent = 'Failed to load diff'; content.style.display = 'block'; }});
 }}
 
 function closeModal() {{

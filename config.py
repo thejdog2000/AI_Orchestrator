@@ -22,11 +22,12 @@ APPROVED_DIR  = BASE_DIR / "approved"
 LOGS_DIR      = BASE_DIR / "logs"
 BACKUPS_DIR   = BASE_DIR / "backups"
 DASHBOARD_DIR = BASE_DIR / "dashboard"
-RETROS_DIR    = BASE_DIR / "retros"
+RETROS_DIR        = BASE_DIR / "retros"
+PIPELINE_LOGS_DIR = BASE_DIR / "pipeline_logs"
 PID_FILE      = BASE_DIR / "orchestrator.pid"
 DB_PATH       = BASE_DIR / "orchestrator.db"
 
-for _d in [TASKS_DIR, PENDING_DIR, APPROVED_DIR, LOGS_DIR, BACKUPS_DIR, DASHBOARD_DIR, RETROS_DIR]:
+for _d in [TASKS_DIR, PENDING_DIR, APPROVED_DIR, LOGS_DIR, BACKUPS_DIR, DASHBOARD_DIR, RETROS_DIR, PIPELINE_LOGS_DIR]:
     _d.mkdir(exist_ok=True)
 
 # ── PROJECTS ──────────────────────────────────────────────────────────────────
@@ -146,6 +147,7 @@ CFG = {
     "PROJECTS":               PROJECTS,
     "ENABLED_PROJECTS":       ENABLED_PROJECTS,
     "RETROS_DIR":              RETROS_DIR,
+    "PIPELINE_LOGS_DIR":       PIPELINE_LOGS_DIR,
     "PERSPECTIVE_PROJECT_MAP": PERSPECTIVE_PROJECT_MAP,
     "PROJECT_COLORS":         PROJECT_COLORS,
     "REPO_PATHS":             REPO_PATHS,

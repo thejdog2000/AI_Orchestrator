@@ -326,13 +326,16 @@ class _MiniMaxTimeout(Exception):
 def _minimax_chat(
     system:     str,
     user:       str,
-    max_tokens: int   = 8000,
+    max_tokens: int   = 65536,
     temperature: float = 0.2,
 ) -> tuple:
     """
     Direct MiniMax chat/completions. Key from env only — never CLI args.
-    Returns (content, input_tokens, output_tokens).
+    Returns (content, input_tokens, output_tokens, cached_tokens).
     temperature=0.2 default — deterministic code output.
+    max_tokens=65536: MiniMax-M3 reasons inside <think>...</think> before writing.
+    On complex multi-file tasks, reasoning alone can be 8k-15k tokens. We want
+    the model to reason fully and still have room for complete file output.
     """
     api_key = os.environ.get("MINIMAX_API_KEY", "")
     if not api_key:
@@ -355,7 +358,7 @@ def _minimax_chat(
                 "temperature": temperature,
                 "max_tokens":  max_tokens,
             },
-            timeout=300,
+            timeout=900,
         )
     except requests.exceptions.Timeout:
         raise _MiniMaxTimeout(estimated_input_tokens)
@@ -364,15 +367,20 @@ def _minimax_chat(
     data   = resp.json()
     usage  = data.get("usage", {})
     cached = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+    msg = data["choices"][0]["message"]
+    # MiniMax-M3 (and some other reasoning models) emit extended thinking in
+    # `reasoning_content` while leaving `content` empty.  Fall back to it so
+    # the file-block parser has something to work with.
+    content = msg.get("content") or msg.get("reasoning_content") or ""
     return (
-        data["choices"][0]["message"]["content"],
+        content,
         usage.get("prompt_tokens", 0),
         usage.get("completion_tokens", 0),
         cached,
     )
 
 
-def select_relevant_files(task: dict, repo_path: Path, context_md: str, max_files: int = 12) -> list[str]:
+def select_relevant_files(task: dict, repo_path: Path, context_md: str, max_files: int = 20) -> list[str]:
     """
     Ask Ollama which files in the repo are most relevant to this task.
     Uses git ls-files for an accurate, .gitignore-respecting file list.
@@ -390,39 +398,40 @@ def select_relevant_files(task: dict, repo_path: Path, context_md: str, max_file
     if not file_tree:
         return []
 
+    # Ask for {"files": [...]} explicitly — json_mode forces a JSON object as root,
+    # so asking for a bare array conflicts with how Ollama implements json_mode.
+    # Controlling the key means we always know exactly where to find the list.
     prompt = (
         f"List the {max_files} source files most relevant to this coding task.\n"
-        f"Return a JSON array of relative paths only. Example: [\"src/main.js\", \"utils/srs.js\"]\n"
-        f"Only include files that exist in the file tree below. Prioritise files that will need to be read or modified.\n\n"
+        f"Only include files that exist in the file tree below.\n"
+        f"Prioritise files that will need to be read or modified to complete the task.\n\n"
         f"TASK: {task['description']}\n"
         f"CONTEXT:\n{context_md}\n\n"
         f"FILE TREE:\n{file_tree[:3000]}\n\n"
-        f"JSON array:"
+        f'Return ONLY this JSON object: {{"files": ["relative/path/to/file.js", "..."]}}'
     )
     raw = ollama_generate(prompt, max_tokens=300, json_mode=True, temperature=0.1)
-    # Strip qwen3 thinking blocks
     if "</think>" in raw:
         raw = raw.split("</think>", 1)[-1].strip()
-    # Extract a JSON array from anywhere in the response — Ollama sometimes wraps it in prose
-    import re as _re
+
     paths = []
     try:
-        paths = json.loads(raw)
+        parsed = json.loads(raw)
+        paths  = parsed.get("files", []) if isinstance(parsed, dict) else []
     except Exception:
-        # Try to find a JSON array anywhere in the response
-        m = _re.search(r'\[.*?\]', raw, _re.DOTALL)
-        if m:
-            try:
-                paths = json.loads(m.group())
-            except Exception:
-                pass
+        pass
+
+    if not isinstance(paths, list):
+        paths = []
+
     if not paths:
-        log.warning(f"[{task['project']}] select_relevant_files parse failed — no file context injected")
+        log.warning(f"[{task['project']}] select_relevant_files returned nothing — no file context injected")
         return []
+
     # Validate each path actually exists in the repo
     valid = [p for p in paths if isinstance(p, str) and (repo_path / p).exists()][:max_files]
     if not valid:
-        log.warning(f"[{task['project']}] select_relevant_files returned no valid paths: {paths[:5]}")
+        log.warning(f"[{task['project']}] select_relevant_files returned no valid paths: {list(paths)[:5]}")
     return valid
 
 
@@ -465,10 +474,42 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
     if not os.environ.get("MINIMAX_API_KEY"):
         return {"success": False, "error": "no_api_key"}
 
-    context_md    = load_context(project, _cfg("REPO_PATHS"))
-    task_prompt   = system_prompt or write_execution_prompt(task, context_md)
-    relevant      = select_relevant_files(task, repo_path, context_md)
-    file_ctx      = _load_file_context(repo_path, relevant) if relevant else ""
+    context_md  = load_context(project, _cfg("REPO_PATHS"))
+    task_prompt = system_prompt or write_execution_prompt(task, context_md)
+
+    # ── PBI CONTEXT ───────────────────────────────────────────────────────────
+    # If this task belongs to a PBI, inject the PBI spec as a header block and
+    # use the PBI's pre-specified affected_files instead of asking Ollama to
+    # guess from the file tree — faster, cheaper, more accurate.
+    pbi_header  = ""
+    pbi_files   = []
+    pbi_id      = task.get("pbi_id")
+    if pbi_id:
+        try:
+            from task_queue import TaskQueue
+            pbi = TaskQueue(_cfg("DB_PATH")).get_pbi(pbi_id)
+            if pbi:
+                pbi_header = (
+                    f"## PARENT PBI: {pbi['title']}\n"
+                    f"{pbi['description']}\n\n"
+                    f"### Acceptance Criteria\n{pbi['acceptance_criteria']}\n\n"
+                )
+                pbi_files = pbi.get("affected_files", [])
+                log.info(f"[{project}] PBI {pbi_id} injected — {len(pbi_files)} pre-specified files")
+        except Exception as _e:
+            log.warning(f"[{project}] PBI load failed ({_e}) — falling back to file discovery")
+
+    # Use PBI file list if available, otherwise ask Ollama to select relevant files
+    if pbi_files:
+        relevant = [p for p in pbi_files if (repo_path / p).exists()]
+    else:
+        try:
+            relevant = select_relevant_files(task, repo_path, context_md)
+        except Exception as _e:
+            log.warning(f"[{project}] select_relevant_files failed ({_e}) — proceeding without file context")
+            relevant = []
+
+    file_ctx = _load_file_context(repo_path, relevant) if relevant else ""
     if relevant:
         log.info(f"[{project}] Injecting {len(relevant)} files into prompt: {relevant}")
 
@@ -476,6 +517,7 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
     # caching kicks in — same files across tasks for a project = cache hits at $0.06/M.
     system = (
         (f"EXISTING FILES (read carefully before modifying):\n\n{file_ctx}\n\n" if file_ctx else "")
+        + (pbi_header if pbi_header else "")
         + task_prompt
     )
 
@@ -492,31 +534,62 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
     try:
         content, input_tokens, output_tokens, cached_tokens = _minimax_chat(system, user_msg)
     except EnvironmentError as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": str(e), "ollama_prompt": task_prompt,
+                "injected_files": relevant}
     except requests.HTTPError as e:
-        return {"success": False, "error": f"api_http_{e.response.status_code}"}
+        return {"success": False, "error": f"api_http_{e.response.status_code}",
+                "ollama_prompt": task_prompt, "injected_files": relevant}
     except _MiniMaxTimeout as e:
         log.warning(f"[{project}] MiniMax timeout — {e}")
-        return {"success": False, "error": str(e), "estimated_input_tokens": e.estimated_input_tokens}
+        return {"success": False, "error": str(e), "estimated_input_tokens": e.estimated_input_tokens,
+                "ollama_prompt": task_prompt, "injected_files": relevant}
     except Exception as e:
         log.error(f"[{project}] MiniMax call failed: {e}")
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": str(e), "ollama_prompt": task_prompt,
+                "injected_files": relevant}
+
+    raw_response = content  # full response before any stripping — saved to pipeline log
+
+    # If content still empty, log the raw message keys to help diagnose future API changes.
+    if not content.strip():
+        msg_keys = list(data["choices"][0]["message"].keys()) if data.get("choices") else []
+        log.warning(f"[{project}] Empty content from MiniMax — message keys: {msg_keys}")
 
     # Strip thinking blocks — M2.7/M3 output <think>...</think> before file content.
+    # Always capture the full thinking block — it's valuable for debugging failures.
+    thinking_block = ""
     if "</think>" in content:
-        content = content.split("</think>", 1)[-1].strip()
+        parts          = content.split("</think>", 1)
+        thinking_block = parts[0].replace("<think>", "").strip()
+        content        = parts[1].strip()
+        log.info(f"[{project}] Think block: {len(thinking_block)} chars | "
+                 f"output: {len(content)} chars")
 
     file_blocks = _parse_file_blocks(content)
     if not file_blocks:
         preview = content[:500]
-        log.warning(f"[{project}] No file blocks for {task['id']}. Preview: {preview[:300]}")
+        if not preview and thinking_block:
+            log.warning(
+                f"[{project}] {task['id']} — model reasoning produced no output.\n"
+                f"  Thinking ({len(thinking_block)} chars): {thinking_block[:800]}"
+            )
+            error = "empty_after_think"
+        else:
+            log.warning(f"[{project}] No file blocks for {task['id']}. "
+                        f"Output preview: {preview[:400]}")
+            error = "no_file_blocks"
         return {
-            "success":         False,
-            "error":           "no_file_blocks",
-            "response_preview": preview,
-            "input_tokens":    input_tokens,
-            "output_tokens":   output_tokens,
-            "cached_tokens":   cached_tokens,
+            "success":          False,
+            "error":            error,
+            "ollama_prompt":    task_prompt,
+            "injected_files":   relevant,
+            "thinking_block":   thinking_block,
+            "output_content":   content,
+            "response_preview": preview or thinking_block[:500],
+            "thinking_preview": thinking_block[:800],
+            "input_tokens":     input_tokens,
+            "output_tokens":    output_tokens,
+            "cached_tokens":    cached_tokens,
         }
 
     written = []
@@ -529,7 +602,8 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
 
     if not written:
         log.error(f"[{project}] All file writes blocked for {task['id']} — possible path traversal")
-        return {"success": False, "error": "all_writes_blocked"}
+        return {"success": False, "error": "all_writes_blocked", "ollama_prompt": task_prompt,
+                "injected_files": relevant, "thinking_block": thinking_block}
 
     subprocess.run(["git", "add", "--intent-to-add", "."],
                    cwd=repo_path, capture_output=True)
@@ -548,9 +622,13 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
         "diff_text":      diff_text,
         "files_written":  list(file_blocks.keys()),
         "injected_files": relevant,
+        "ollama_prompt":  task_prompt,
+        "thinking_block": thinking_block,
+        "output_content": content,
         "input_tokens":   input_tokens,
         "output_tokens":  output_tokens,
-        "system_prompt":  prompt,   # pass back for retry revision
+        "cached_tokens":  cached_tokens,
+        "system_prompt":  task_prompt,   # pass back for retry revision
     }
 
 
@@ -627,6 +705,7 @@ def run_task(task: dict, spend_tracker, task_queue):
     evaluation    = {}
     system_prompt = ""
     attempts_made = 0
+    attempt_logs  = []   # full per-attempt data written to pipeline_logs/{task_id}.json
     context_md    = load_context(project, _cfg("REPO_PATHS"))
 
     # Notify Discord that this task is starting
@@ -648,6 +727,20 @@ def run_task(task: dict, spend_tracker, task_queue):
 
         result = run_minimax_task(task, system_prompt=system_prompt)
 
+        # Record per-attempt data for pipeline log
+        attempt_logs.append({
+            "attempt":        attempts_made,
+            "ollama_prompt":  result.get("ollama_prompt", system_prompt),
+            "injected_files": result.get("injected_files", []),
+            "thinking_block": result.get("thinking_block", ""),
+            "output_content": result.get("output_content", ""),
+            "files_written":  result.get("files_written", []),
+            "input_tokens":   result.get("input_tokens", 0),
+            "output_tokens":  result.get("output_tokens", 0),
+            "cached_tokens":  result.get("cached_tokens", 0),
+            "error":          result.get("error") if not result["success"] else None,
+        })
+
         if result["success"]:
             break
 
@@ -661,14 +754,40 @@ def run_task(task: dict, spend_tracker, task_queue):
                 _cfg("MINIMAX_MODEL"),
             )
 
+        error = result.get("error", "")
+
+        # Don't retry timeouts — the prompt is fine, the API is just slow.
+        # Retrying immediately burns identical input tokens for no gain.
+        # Mark failed so the task re-queues cleanly on the next scheduler cycle.
+        if "timed out" in error:
+            log.warning(f"[{project}] Timeout on attempt {attempt + 1} — skipping retries to save tokens")
+            break
+
         wait = backoff[min(attempt, len(backoff) - 1)]
-        log.warning(f"[{project}] Attempt {attempt + 1} failed: {result.get('error')}. "
+        log.warning(f"[{project}] Attempt {attempt + 1} failed: {error}. "
                     f"Retrying in {wait}s...")
 
         # Run quality gate on failed diff to get failure reasons for next revision
         if result.get("diff_text"):
             evaluation = evaluate_diff(result["diff_text"], task)
         time.sleep(wait)
+
+    def _write_pipeline_log(final_status: str, diff_path_str: str = ""):
+        """Write full pipeline log for this task to pipeline_logs/{task_id}.json."""
+        try:
+            log_dir  = _cfg("PIPELINE_LOGS_DIR")
+            log_path = log_dir / f"{task['id']}.json"
+            log_path.write_text(json.dumps({
+                "task_id":     task["id"],
+                "project":     project,
+                "description": task.get("description", ""),
+                "created_at":  time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "final_status": final_status,
+                "attempts":    attempt_logs,
+                "diff_path":   diff_path_str,
+            }, indent=2, default=str))
+        except Exception as _e:
+            log.warning(f"[{project}] Pipeline log write failed: {_e}")
 
     # All attempts exhausted
     if not result or not result["success"]:
@@ -693,9 +812,10 @@ def run_task(task: dict, spend_tracker, task_queue):
             "system_prompt":     system_prompt,
             "injected_files":    result.get("injected_files", []) if result else [],
             "response_preview":  result.get("response_preview", "") if result else "",
+            "thinking_preview":  result.get("thinking_preview", "") if result else "",
         }, indent=2))
+        _write_pipeline_log("failed")
         task_queue.mark_failed(task, notes=error)
-        # Persist the system prompt to the DB so the dashboard can show it
         if system_prompt:
             task_queue.update_status(task["id"], "failed",
                                      system_prompt=system_prompt[:2000])
@@ -716,8 +836,8 @@ def run_task(task: dict, spend_tracker, task_queue):
             "system_prompt": system_prompt,
             "injected_files": result.get("injected_files", []),
         }, indent=2))
+        _write_pipeline_log("quality_failed", str(result.get("diff_path", "")))
         task_queue.mark_failed(task, notes=f"quality: {reasoning}")
-        # Persist score and system prompt — mark_failed doesn't carry them
         task_queue.update_status(task["id"], "failed",
                                  quality_score=evaluation.get("score", 0),
                                  system_prompt=system_prompt[:2000])
@@ -751,6 +871,11 @@ def run_task(task: dict, spend_tracker, task_queue):
     # ── AUTO-COMMIT ───────────────────────────────────────────────────────────
     # approval_required tasks land in failed so they surface for review on the
     # dashboard — the diff is saved and the system prompt is stored for context.
+    _write_pipeline_log(
+        "approval_required" if task.get("approval_required") else "committed",
+        str(result.get("diff_path", "")),
+    )
+
     if task.get("approval_required"):
         task_queue.mark_failed(task, notes="needs approval — review diff before committing")
         task_queue.update_status(task["id"], "failed",
@@ -760,7 +885,6 @@ def run_task(task: dict, spend_tracker, task_queue):
         log.info(f"[{project}] {task['id']} → failed (approval_required — diff saved for review)")
         _notify().task_pending_review(task)
     else:
-        # Auto-commit: git add -A + git commit
         commit_hash = _auto_commit(task, repo_path)
         task_queue.mark_committed(
             task,
@@ -769,7 +893,7 @@ def run_task(task: dict, spend_tracker, task_queue):
             actual_tokens=result.get("output_tokens", 0),
             cost_usd=cost,
             model_used=_cfg("MINIMAX_MODEL"),
-            system_prompt=result.get("system_prompt", "")[:2000],  # store for auditability
+            system_prompt=result.get("system_prompt", "")[:2000],
             quality_score=evaluation.get("score", 0),
         )
         result["commit_hash"] = commit_hash

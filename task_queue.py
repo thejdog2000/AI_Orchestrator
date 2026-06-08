@@ -24,6 +24,30 @@ log = logging.getLogger(__name__)
 # ── SCHEMA ───────────────────────────────────────────────────────────────────
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS epics (
+    id         TEXT PRIMARY KEY,   -- e.g. "epic_stt_reliability"
+    project    TEXT NOT NULL,
+    name       TEXT NOT NULL,      -- display name
+    color      TEXT DEFAULT '#6366f1',
+    created_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pbis (
+    id                   TEXT PRIMARY KEY,   -- e.g. "pbi_lang_001"
+    epic_id              TEXT REFERENCES epics(id),
+    project              TEXT NOT NULL,
+    title                TEXT NOT NULL,
+    description          TEXT DEFAULT '',
+    acceptance_criteria  TEXT DEFAULT '',
+    affected_files       TEXT DEFAULT '[]',  -- JSON array of repo-relative paths
+    status               TEXT DEFAULT 'active',  -- active | complete | cancelled
+    created_at           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pbis_epic    ON pbis(epic_id);
+CREATE INDEX IF NOT EXISTS idx_pbis_project ON pbis(project);
+CREATE INDEX IF NOT EXISTS idx_pbis_status  ON pbis(status);
+
 CREATE TABLE IF NOT EXISTS tasks (
     id               TEXT PRIMARY KEY,
     project          TEXT    NOT NULL,
@@ -59,12 +83,14 @@ CREATE TABLE IF NOT EXISTS tasks (
     quality_gate_skipped INTEGER DEFAULT 0,
     rejection_reason TEXT    DEFAULT '',
     rejected_at      TEXT,
-    notes            TEXT    DEFAULT ''
+    notes            TEXT    DEFAULT '',
+    pbi_id           TEXT    REFERENCES pbis(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_project          ON tasks(project);
 CREATE INDEX IF NOT EXISTS idx_status           ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_description_hash ON tasks(description_hash);
+CREATE INDEX IF NOT EXISTS idx_pbi_id           ON tasks(pbi_id);
 """
 
 # ── HELPERS ──────────────────────────────────────────────────────────────────
@@ -242,6 +268,110 @@ class TaskQueue:
             notes=f"rejected: {reason}" if reason else "rejected",
         )
         log.info(f"[{task['project']}] {task['id']} → rejected ({reason or 'no reason'})")
+
+    # ── EPICS & PBIs ─────────────────────────────────────────────────────────
+
+    def add_epic(self, epic: dict) -> bool:
+        """Insert an epic. Returns True if inserted, False if id already exists."""
+        with self._conn() as conn:
+            if conn.execute("SELECT 1 FROM epics WHERE id=?", (epic["id"],)).fetchone():
+                return False
+            conn.execute(
+                "INSERT INTO epics (id, project, name, color, created_at) VALUES (?,?,?,?,?)",
+                (
+                    epic["id"],
+                    epic["project"],
+                    epic["name"],
+                    epic.get("color", "#6366f1"),
+                    datetime.now().isoformat(),
+                ),
+            )
+        return True
+
+    def add_pbi(self, pbi: dict) -> bool:
+        """Insert a PBI. Returns True if inserted, False if id already exists."""
+        with self._conn() as conn:
+            if conn.execute("SELECT 1 FROM pbis WHERE id=?", (pbi["id"],)).fetchone():
+                return False
+            conn.execute(
+                """INSERT INTO pbis
+                   (id, epic_id, project, title, description, acceptance_criteria,
+                    affected_files, status, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (
+                    pbi["id"],
+                    pbi.get("epic_id"),
+                    pbi["project"],
+                    pbi["title"],
+                    pbi.get("description", ""),
+                    pbi.get("acceptance_criteria", ""),
+                    json.dumps(pbi.get("affected_files", [])),
+                    pbi.get("status", "active"),
+                    datetime.now().isoformat(),
+                ),
+            )
+        return True
+
+    def get_pbi(self, pbi_id: str) -> "dict | None":
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM pbis WHERE id=?", (pbi_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["affected_files"] = json.loads(d.get("affected_files") or "[]")
+        return d
+
+    def get_epic(self, epic_id: str) -> "dict | None":
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM epics WHERE id=?", (epic_id,)).fetchone()
+        return dict(row) if row else None
+
+    def all_epics(self, project: str = None) -> list[dict]:
+        with self._conn() as conn:
+            if project:
+                rows = conn.execute(
+                    "SELECT * FROM epics WHERE project=? ORDER BY created_at", (project,)
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT * FROM epics ORDER BY project, created_at").fetchall()
+        return [dict(r) for r in rows]
+
+    def pbis_for_epic(self, epic_id: str) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM pbis WHERE epic_id=? ORDER BY created_at", (epic_id,)
+            ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["affected_files"] = json.loads(d.get("affected_files") or "[]")
+            result.append(d)
+        return result
+
+    def tasks_for_pbi(self, pbi_id: str) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tasks WHERE pbi_id=? ORDER BY priority ASC, created_at ASC",
+                (pbi_id,),
+            ).fetchall()
+        return [_row_to_dict(r) for r in rows]
+
+    def pbi_progress(self, pbi_id: str) -> dict:
+        """Returns {total, completed, failed, queued} task counts for a PBI."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) as n FROM tasks WHERE pbi_id=? GROUP BY status",
+                (pbi_id,),
+            ).fetchall()
+        counts = {r["status"]: r["n"] for r in rows}
+        total  = sum(counts.values())
+        return {
+            "total":     total,
+            "completed": counts.get("completed", 0),
+            "failed":    counts.get("failed", 0),
+            "queued":    counts.get("queued", 0),
+            "running":   counts.get("running", 0),
+        }
 
     # ── READ ─────────────────────────────────────────────────────────────────
 

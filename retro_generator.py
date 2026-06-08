@@ -275,6 +275,22 @@ def load_all_retros(max_days: int = 90) -> list[dict]:
 
 # ── PUBLIC API ───────────────────────────────────────────────────────────────
 
+def cleanup_pipeline_logs(keep_days: int = 7):
+    """Delete pipeline logs older than keep_days. Called during daily retro."""
+    try:
+        from config import PIPELINE_LOGS_DIR
+        cutoff = datetime.now() - timedelta(days=keep_days)
+        removed = 0
+        for f in PIPELINE_LOGS_DIR.glob("*.json"):
+            if datetime.fromtimestamp(f.stat().st_mtime) < cutoff:
+                f.unlink()
+                removed += 1
+        if removed:
+            log.info(f"Pipeline log cleanup: removed {removed} files older than {keep_days} days")
+    except Exception as e:
+        log.warning(f"Pipeline log cleanup failed: {e}")
+
+
 def generate_retrospective(hours: int = 24) -> dict:
     """
     Generate and save a retrospective covering the last `hours` of activity.
@@ -306,6 +322,7 @@ def generate_retrospective(hours: int = 24) -> dict:
     }
 
     _save_retro(retro)
+    cleanup_pipeline_logs(keep_days=7)
     log.info(f"Retro complete: {stats['completed']} done, {stats['failed']} failed, "
              f"${stats['total_cost_usd']:.4f} spent")
     return retro

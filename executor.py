@@ -400,9 +400,19 @@ def select_relevant_files(task: dict, repo_path: Path, context_md: str, max_file
         f"JSON array:"
     )
     raw = ollama_generate(prompt, max_tokens=300, json_mode=True, temperature=0.1)
+    # Strip qwen3 thinking blocks before JSON parse
+    if "</think>" in raw:
+        raw = raw.split("</think>", 1)[-1].strip()
     try:
         paths = json.loads(raw)
-        return [p for p in paths if isinstance(p, str)][:max_files]
+        # Validate each path actually exists in the repo — reject placeholder strings
+        valid = [
+            p for p in paths
+            if isinstance(p, str) and (repo_path / p).exists()
+        ][:max_files]
+        if not valid and paths:
+            log.warning(f"[{task['project']}] select_relevant_files returned no valid paths: {paths[:5]}")
+        return valid
     except Exception:
         log.warning(f"[{task['project']}] select_relevant_files parse failed — no file context injected")
         return []
@@ -490,8 +500,9 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
 
     file_blocks = _parse_file_blocks(content)
     if not file_blocks:
-        log.warning(f"[{project}] No file blocks for {task['id']}. Preview: {content[:300]}")
-        return {"success": False, "error": "no_file_blocks"}
+        preview = content[:500]
+        log.warning(f"[{project}] No file blocks for {task['id']}. Preview: {preview[:300]}")
+        return {"success": False, "error": "no_file_blocks", "response_preview": preview}
 
     written = []
     for rel_path, file_content in file_blocks.items():
@@ -517,13 +528,14 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
     cache_note = f" | {cached_tokens} cached" if cached_tokens else ""
     log.info(f"[{project}] {input_tokens} in / {output_tokens} out{cache_note}")
     return {
-        "success":       True,
-        "diff_path":     diff_path,
-        "diff_text":     diff_text,
-        "files_written": list(file_blocks.keys()),
-        "input_tokens":  input_tokens,
-        "output_tokens": output_tokens,
-        "system_prompt": prompt,   # pass back for retry revision
+        "success":        True,
+        "diff_path":      diff_path,
+        "diff_text":      diff_text,
+        "files_written":  list(file_blocks.keys()),
+        "injected_files": relevant,
+        "input_tokens":   input_tokens,
+        "output_tokens":  output_tokens,
+        "system_prompt":  prompt,   # pass back for retry revision
     }
 
 
@@ -596,14 +608,18 @@ def run_task(task: dict, spend_tracker, task_queue):
     enabled_projects = _cfg("ENABLED_PROJECTS")
     refill_threshold = _cfg("QUEUE_REFILL_THRESHOLD")
 
-    result     = None
-    evaluation = {}
-    context_md = load_context(project, _cfg("REPO_PATHS"))
+    result        = None
+    evaluation    = {}
+    system_prompt = ""
+    attempts_made = 0
+    context_md    = load_context(project, _cfg("REPO_PATHS"))
 
     # Notify Discord that this task is starting
     _notify().task_started(task)
 
     for attempt in range(max_retries):
+        attempts_made = attempt + 1
+
         # Clean working tree before every attempt
         if repo_path and repo_path.exists():
             subprocess.run(["git", "checkout", "--", "."], cwd=repo_path, capture_output=True)
@@ -632,7 +648,7 @@ def run_task(task: dict, spend_tracker, task_queue):
     # All attempts exhausted
     if not result or not result["success"]:
         error = str(result.get("error", "unknown")) if result else "no_result"
-        log.error(f"[{project}] {task['id']} failed after {max_retries} attempts")
+        log.error(f"[{project}] {task['id']} failed after {attempts_made} attempts")
 
         # Record partial spend for any timeout attempts — MiniMax bills input tokens
         # processed before timeout even though we never got a response.
@@ -641,13 +657,24 @@ def run_task(task: dict, spend_tracker, task_queue):
                 project,
                 result["estimated_input_tokens"],
                 _cfg("MINIMAX_MODEL"),
-                reason=f"timeout after {max_retries} attempts",
+                reason=f"timeout after {attempts_made} attempts",
             )
 
         fail_path = pending_dir / f"FAILED_{project}_{task['id']}.json"
-        fail_path.write_text(json.dumps({"task": task, "result": result}, indent=2))
+        fail_path.write_text(json.dumps({
+            "task":              task,
+            "result":            result,
+            "attempts":          attempts_made,
+            "system_prompt":     system_prompt,
+            "injected_files":    result.get("injected_files", []) if result else [],
+            "response_preview":  result.get("response_preview", "") if result else "",
+        }, indent=2))
         task_queue.mark_failed(task, notes=error)
-        _notify().task_failed(task, error, max_retries)
+        # Persist the system prompt to the DB so the dashboard can show it
+        if system_prompt:
+            task_queue.update_status(task["id"], "failed",
+                                     system_prompt=system_prompt[:2000])
+        _notify().task_failed(task, error, attempts_made)
         return
 
     # Quality gate
@@ -658,10 +685,17 @@ def run_task(task: dict, spend_tracker, task_queue):
         reasoning = evaluation.get("reasoning", "")
         log.warning(f"[{project}] Quality gate failed — flagging {task['id']} for review")
         fail_path = pending_dir / f"QUALITY_FAILED_{project}_{task['id']}.json"
-        fail_path.write_text(json.dumps({"task": task, "evaluation": evaluation}, indent=2))
+        fail_path.write_text(json.dumps({
+            "task":          task,
+            "evaluation":    evaluation,
+            "system_prompt": system_prompt,
+            "injected_files": result.get("injected_files", []),
+        }, indent=2))
         task_queue.mark_failed(task, notes=f"quality: {reasoning}")
-        # Persist score separately — mark_failed doesn't carry it, but we need it for metrics
-        task_queue.update_status(task["id"], "failed", quality_score=evaluation.get("score", 0))
+        # Persist score and system prompt — mark_failed doesn't carry them
+        task_queue.update_status(task["id"], "failed",
+                                 quality_score=evaluation.get("score", 0),
+                                 system_prompt=system_prompt[:2000])
         _notify().quality_gate_failed(task, reasoning)
         return
 

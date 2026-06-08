@@ -11,7 +11,13 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from task_queue import DB_PATH, PROJECT_COLORS, PERSPECTIVES, EFFORT_CATEGORIES
+from config import DB_PATH, PENDING_DIR, PROJECT_COLORS, PERSPECTIVES, EFFORT_CATEGORIES
+
+try:
+    from retro_generator import load_all_retros
+except ImportError:
+    def load_all_retros():
+        return []
 
 
 def _load_metrics() -> dict:
@@ -70,15 +76,36 @@ def _load_all_tasks() -> list[dict]:
 
         # Compute duration in seconds if start + end both recorded
         try:
-            from datetime import datetime as dt
             if d.get("started_at") and d.get("completed_at"):
-                s = dt.fromisoformat(d["started_at"])
-                e = dt.fromisoformat(d["completed_at"])
+                s = datetime.fromisoformat(d["started_at"])
+                e = datetime.fromisoformat(d["completed_at"])
                 d["duration_sec"] = int((e - s).total_seconds())
             else:
                 d["duration_sec"] = None
         except Exception:
             d["duration_sec"] = None
+
+        # For failed tasks, load extra detail from the saved JSON
+        d["quality_reasoning"] = ""
+        d["quality_issues"]    = []
+        d["response_preview"]  = ""
+        d["attempts"]          = None
+        d["injected_files"]    = []
+        if d.get("status") == "failed":
+            for prefix in ("QUALITY_FAILED_", "FAILED_"):
+                detail_path = PENDING_DIR / f"{prefix}{d['project']}_{d['id']}.json"
+                if detail_path.exists():
+                    try:
+                        detail = json.loads(detail_path.read_text())
+                        ev = detail.get("evaluation", {})
+                        d["quality_reasoning"] = ev.get("reasoning", "")
+                        d["quality_issues"]    = ev.get("issues", [])
+                        d["response_preview"]  = detail.get("response_preview", "")
+                        d["attempts"]          = detail.get("attempts")
+                        d["injected_files"]    = detail.get("injected_files", [])
+                    except Exception:
+                        pass
+                    break
 
         result.append(d)
     return result
@@ -91,9 +118,11 @@ def generate() -> Path:
     projects    = sorted({t["project"] for t in tasks})
     generated   = datetime.now().strftime("%Y-%m-%d %H:%M")
 
+    retros       = load_all_retros()
     tasks_json   = json.dumps(tasks, default=str)
     colors_json  = json.dumps(PROJECT_COLORS)
     metrics_json = json.dumps(metrics, default=str)
+    retros_json  = json.dumps(retros, default=str)
 
     # Pre-computed to avoid backslashes inside f-string expressions (Python 3.9 compat)
     project_pills = " ".join(
@@ -141,15 +170,36 @@ def generate() -> Path:
   .pill:hover {{ color: var(--text); border-color: #4b5280; }}
   .pill.active {{ color: #fff; border-color: transparent; }}
 
+  /* ── ADVANCED FILTERS DROPDOWN ── */
+  .adv-filter-wrap {{ position: relative; }}
+  .adv-filter-btn {{
+    padding: 3px 12px; border-radius: 999px; font-size: 11px; font-weight: 500;
+    cursor: pointer; border: 1px solid var(--border); background: var(--surface2);
+    color: var(--muted); transition: all .15s; user-select: none;
+  }}
+  .adv-filter-btn:hover {{ color: var(--text); border-color: #4b5280; }}
+  .adv-filter-btn.has-active {{ color: var(--blue); border-color: var(--blue); }}
+  .adv-filter-panel {{
+    display: none; position: absolute; top: calc(100% + 8px); left: 0; z-index: 50;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; min-width: 320px; box-shadow: 0 12px 40px rgba(0,0,0,.5);
+  }}
+  .adv-filter-panel.open {{ display: block; }}
+  .adv-section-label {{
+    font-size: 10px; text-transform: uppercase; letter-spacing: .5px;
+    color: var(--muted); margin-bottom: 8px; font-weight: 600;
+  }}
+  .adv-pills {{ display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 14px; }}
+
   /* ── STATS BAR ── */
   .stats-bar {{ padding: 10px 20px; display: flex; gap: 20px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }}
   .stat {{ font-size: 11px; color: var(--muted); }}
   .stat span {{ color: var(--text); font-weight: 600; font-size: 13px; }}
 
   /* ── BOARD ── */
-  .board {{ display: flex; gap: 12px; padding: 16px 20px; overflow-x: auto; min-height: calc(100vh - 160px); }}
+  .board {{ display: flex; gap: 12px; padding: 16px 20px; min-height: calc(100vh - 160px); }}
   .column {{
-    flex: 0 0 280px; background: var(--surface); border-radius: 10px;
+    flex: 1 1 0; min-width: 0; background: var(--surface); border-radius: 10px;
     border: 1px solid var(--border); display: flex; flex-direction: column;
   }}
   .col-header {{
@@ -217,7 +267,7 @@ def generate() -> Path:
   .tab-content.active {{ display: block; }}
 
   /* ── METRICS ── */
-  .metrics-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; padding: 16px 20px; }}
+  .metrics-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding: 16px 20px; }}
   .metric-card {{
     background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
   }}
@@ -231,48 +281,97 @@ def generate() -> Path:
   .persp-bar {{ height: 100%; background: var(--blue); border-radius: 3px; }}
   .persp-pct {{ font-size: 11px; color: var(--muted); width: 35px; text-align: right; }}
 
+  /* ── RETROS ── */
+  .retro-layout {{ display: grid; grid-template-columns: 220px 1fr; gap: 0; min-height: calc(100vh - 120px); }}
+  .retro-sidebar {{
+    border-right: 1px solid var(--border); padding: 12px 0; overflow-y: auto;
+  }}
+  .retro-date-item {{
+    padding: 10px 16px; font-size: 13px; cursor: pointer; color: var(--muted);
+    border-left: 3px solid transparent; transition: all .15s;
+  }}
+  .retro-date-item:hover {{ color: var(--text); background: var(--surface2); }}
+  .retro-date-item.active {{ color: var(--text); border-left-color: var(--blue); background: var(--surface2); }}
+  .retro-date-label {{ font-weight: 600; }}
+  .retro-date-sub {{ font-size: 11px; color: var(--muted); margin-top: 2px; }}
+  .retro-content {{ padding: 24px 32px; overflow-y: auto; }}
+  .retro-header {{ margin-bottom: 24px; }}
+  .retro-title {{ font-size: 20px; font-weight: 700; margin-bottom: 4px; }}
+  .retro-period {{ font-size: 12px; color: var(--muted); }}
+  .retro-stat-row {{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 28px; }}
+  .retro-stat {{
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px;
+  }}
+  .retro-stat-value {{ font-size: 26px; font-weight: 700; }}
+  .retro-stat-label {{ font-size: 11px; color: var(--muted); margin-top: 3px; text-transform: uppercase; letter-spacing: .4px; }}
+  .retro-section {{ margin-bottom: 28px; }}
+  .retro-section-title {{
+    font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px;
+    color: var(--muted); margin-bottom: 12px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }}
+  .retro-narrative {{
+    background: var(--surface2); border-radius: 10px; padding: 18px 20px;
+    font-size: 14px; line-height: 1.75; color: var(--text);
+  }}
+  .retro-narrative-block {{ margin-bottom: 20px; }}
+  .retro-narrative-block:last-child {{ margin-bottom: 0; }}
+  .retro-narrative-label {{ font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--blue); margin-bottom: 6px; }}
+  .retro-task-list {{ display: flex; flex-direction: column; gap: 8px; }}
+  .retro-task {{
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px; display: flex; gap: 12px; align-items: flex-start;
+  }}
+  .retro-task-dot {{ width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; margin-top: 5px; }}
+  .retro-task-body {{ flex: 1; min-width: 0; }}
+  .retro-task-desc {{ font-size: 13px; color: var(--text); line-height: 1.5; }}
+  .retro-task-meta {{ font-size: 11px; color: var(--muted); margin-top: 4px; }}
+  .retro-task-note {{ font-size: 11px; color: var(--red); margin-top: 3px; font-family: monospace; }}
+  .retro-empty {{ color: var(--muted); font-size: 13px; padding: 16px 0; }}
+
   /* ── MODAL ── */
   .modal-overlay {{
-    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.65);
-    z-index: 100; align-items: flex-start; justify-content: center; padding: 40px 20px; overflow-y: auto;
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.7);
+    z-index: 100; align-items: flex-start; justify-content: center; padding: 20px; overflow-y: auto;
   }}
   .modal-overlay.open {{ display: flex; }}
   .modal {{
-    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-    width: 100%; max-width: 780px; padding: 28px; position: relative;
-    box-shadow: 0 24px 80px rgba(0,0,0,.6);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+    width: 100%; max-width: 1400px; padding: 48px; position: relative;
+    box-shadow: 0 32px 100px rgba(0,0,0,.7);
   }}
   .modal-close {{
-    position: absolute; top: 16px; right: 18px; font-size: 20px; cursor: pointer;
+    position: absolute; top: 20px; right: 24px; font-size: 28px; cursor: pointer;
     color: var(--muted); background: none; border: none; line-height: 1;
   }}
   .modal-close:hover {{ color: var(--text); }}
-  .modal-id {{ font-size: 11px; color: var(--muted); margin-bottom: 6px; font-family: monospace; }}
-  .modal-title {{ font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 16px; line-height: 1.5; }}
-  .modal-section {{ margin-top: 20px; }}
+  .modal-id {{ font-size: 14px; color: var(--muted); margin-bottom: 10px; font-family: monospace; }}
+  .modal-title {{ font-size: 22px; font-weight: 600; color: var(--text); margin-bottom: 24px; line-height: 1.5; }}
+  .modal-section {{ margin-top: 32px; }}
   .modal-section-label {{
-    font-size: 10px; text-transform: uppercase; letter-spacing: .6px;
-    color: var(--muted); margin-bottom: 8px; font-weight: 600;
+    font-size: 13px; text-transform: uppercase; letter-spacing: .6px;
+    color: var(--muted); margin-bottom: 14px; font-weight: 600;
   }}
-  .modal-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }}
-  .modal-field {{ background: var(--surface2); border-radius: 8px; padding: 10px 12px; }}
-  .modal-field-label {{ font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 4px; }}
-  .modal-field-value {{ font-size: 12px; color: var(--text); font-weight: 500; word-break: break-all; }}
+  .modal-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }}
+  .modal-field {{ background: var(--surface2); border-radius: 10px; padding: 16px 18px; }}
+  .modal-field-label {{ font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 6px; }}
+  .modal-field-value {{ font-size: 16px; color: var(--text); font-weight: 500; word-break: break-all; }}
   .modal-rationale {{
-    background: var(--surface2); border-radius: 8px; padding: 12px 14px;
-    font-size: 12px; color: var(--text); line-height: 1.6; border-left: 3px solid var(--blue);
+    background: var(--surface2); border-radius: 10px; padding: 18px 20px;
+    font-size: 15px; color: var(--text); line-height: 1.7; border-left: 4px solid var(--blue);
   }}
-  .diff-stats {{ display: flex; gap: 12px; align-items: center; }}
-  .diff-added {{ color: var(--green); font-size: 13px; font-weight: 600; font-family: monospace; }}
-  .diff-removed {{ color: var(--red); font-size: 13px; font-weight: 600; font-family: monospace; }}
-  .diff-files {{ color: var(--muted); font-size: 12px; }}
+  .diff-stats {{ display: flex; gap: 16px; align-items: center; }}
+  .diff-added {{ color: var(--green); font-size: 16px; font-weight: 600; font-family: monospace; }}
+  .diff-removed {{ color: var(--red); font-size: 16px; font-weight: 600; font-family: monospace; }}
+  .diff-files {{ color: var(--muted); font-size: 15px; }}
   .modal-prompt {{
-    background: #0a0c14; border: 1px solid var(--border); border-radius: 8px;
-    padding: 14px; font-family: monospace; font-size: 11px; color: #94a3b8;
-    white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto; line-height: 1.6;
+    background: #0a0c14; border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px; font-family: monospace; font-size: 13px; color: #94a3b8;
+    white-space: pre-wrap; word-break: break-word; max-height: 400px; overflow-y: auto; line-height: 1.7;
   }}
   .modal-prompt-toggle {{
-    font-size: 11px; color: var(--blue); cursor: pointer; margin-bottom: 8px; display: inline-block;
+    font-size: 13px; color: var(--blue); cursor: pointer; margin-bottom: 10px; display: inline-block;
   }}
   .card {{ cursor: pointer; }}
   .card:hover {{ border-color: var(--blue); }}
@@ -297,6 +396,7 @@ def generate() -> Path:
 <div class="tabs">
   <div class="tab active" onclick="switchTab('kanban',this)">📋 Kanban</div>
   <div class="tab" onclick="switchTab('metrics',this)">📊 Metrics</div>
+  <div class="tab" onclick="switchTab('retros',this)">🔁 Retros</div>
 </div>
 
 <div id="tab-kanban" class="tab-content active">
@@ -304,16 +404,24 @@ def generate() -> Path:
   <span class="filter-label">Project</span>
   <span class="pill active" data-filter="project" data-value="all" onclick="setFilter('project','all',this)">All</span>
   {project_pills}
-  &nbsp;
-  <span class="filter-label">Perspective</span>
-  <span class="pill active" data-filter="perspective" data-value="all" onclick="setFilter('perspective','all',this)">All</span>
-  {perspective_pills}
-  &nbsp;
-  <span class="filter-label">Complexity</span>
-  <span class="pill active" data-filter="complexity" data-value="all" onclick="setFilter('complexity','all',this)">All</span>
-  <span class="pill" data-filter="complexity" data-value="high" onclick="setFilter('complexity','high',this)" style="color:var(--red)">High</span>
-  <span class="pill" data-filter="complexity" data-value="medium" onclick="setFilter('complexity','medium',this)" style="color:var(--yellow)">Medium</span>
-  <span class="pill" data-filter="complexity" data-value="low" onclick="setFilter('complexity','low',this)" style="color:var(--green)">Low</span>
+
+  <div class="adv-filter-wrap" style="margin-left:8px">
+    <div class="adv-filter-btn" id="advFilterBtn" onclick="toggleAdvFilters()">⚙ Filters</div>
+    <div class="adv-filter-panel" id="advFilterPanel">
+      <div class="adv-section-label">Perspective</div>
+      <div class="adv-pills">
+        <span class="pill active" data-filter="perspective" data-value="all" onclick="setFilter('perspective','all',this)">All</span>
+        {perspective_pills}
+      </div>
+      <div class="adv-section-label">Complexity</div>
+      <div class="adv-pills">
+        <span class="pill active" data-filter="complexity" data-value="all" onclick="setFilter('complexity','all',this)">All</span>
+        <span class="pill" data-filter="complexity" data-value="high" onclick="setFilter('complexity','high',this)" style="color:var(--red)">High</span>
+        <span class="pill" data-filter="complexity" data-value="medium" onclick="setFilter('complexity','medium',this)" style="color:var(--yellow)">Medium</span>
+        <span class="pill" data-filter="complexity" data-value="low" onclick="setFilter('complexity','low',this)" style="color:var(--green)">Low</span>
+      </div>
+    </div>
+  </div>
 </div>
 
 <div class="board" id="board"></div>
@@ -323,10 +431,20 @@ def generate() -> Path:
   <div class="metrics-grid" id="metricsGrid"></div>
 </div>
 
+<div id="tab-retros" class="tab-content">
+  <div class="retro-layout">
+    <div class="retro-sidebar" id="retroSidebar"></div>
+    <div class="retro-content" id="retroContent">
+      <div class="retro-empty" style="padding:40px">No retrospectives yet — the first one generates at midnight.</div>
+    </div>
+  </div>
+</div>
+
 <script>
 const ALL_TASKS   = {tasks_json};
 const COLORS      = {colors_json};
 const METRICS     = {metrics_json};
+const ALL_RETROS  = {retros_json};
 const COLUMNS     = [
   {{ key: 'queued',         label: 'Queued',                dot: '#94a3b8' }},
   {{ key: 'running',        label: 'Running',               dot: '#3b82f6' }},
@@ -337,10 +455,30 @@ const COLUMNS     = [
 
 const filters = {{ project: 'all', perspective: 'all', complexity: 'all' }};
 
+function toggleAdvFilters() {{
+  document.getElementById('advFilterPanel').classList.toggle('open');
+}}
+
+// Close dropdown when clicking outside
+document.addEventListener('click', e => {{
+  const wrap = document.getElementById('advFilterBtn')?.closest('.adv-filter-wrap');
+  if (wrap && !wrap.contains(e.target)) {{
+    document.getElementById('advFilterPanel').classList.remove('open');
+  }}
+}});
+
 function setFilter(key, value, el) {{
   filters[key] = value;
-  el.closest('.filters').querySelectorAll(`[data-filter="${{key}}"]`).forEach(p => p.classList.remove('active'));
+  // Pills may live inside .filters or .adv-filter-panel — search both
+  document.querySelectorAll(`[data-filter="${{key}}"]`).forEach(p => p.classList.remove('active'));
   el.classList.add('active');
+  // Highlight the ⚙ Filters button if any advanced filter is non-default
+  const btn = document.getElementById('advFilterBtn');
+  if (btn) {{
+    const advActive = filters.perspective !== 'all' || filters.complexity !== 'all';
+    btn.classList.toggle('has-active', advActive);
+    btn.textContent = advActive ? '⚙ Filters ●' : '⚙ Filters';
+  }}
   render();
 }}
 
@@ -404,6 +542,23 @@ function render() {{
     const isCompleted = col.key === 'completed';
     const bodyId      = `col-${{col.key}}`;
 
+    // Queued: cap at 5 per project so the column doesn't dominate the board
+    let displayTasks = colTasks;
+    let hiddenCount  = 0;
+    if (col.key === 'queued') {{
+      const byProject = {{}};
+      colTasks.forEach(t => {{
+        if (!byProject[t.project]) byProject[t.project] = [];
+        byProject[t.project].push(t);
+      }});
+      displayTasks = Object.values(byProject).flatMap(tasks => tasks.slice(0, 5));
+      hiddenCount  = colTasks.length - displayTasks.length;
+    }}
+
+    const moreFooter = hiddenCount > 0
+      ? `<div style="text-align:center;padding:8px;font-size:12px;color:var(--muted)">+${{hiddenCount}} more (5 shown per project)</div>`
+      : '';
+
     colEl.innerHTML = `
       <div class="col-header">
         <span style="width:8px;height:8px;border-radius:50%;background:${{col.dot}};display:inline-block"></span>
@@ -412,7 +567,8 @@ function render() {{
       </div>
       ${{isCompleted ? `<div class="completed-toggle" onclick="toggleCompleted()">▸ Show completed</div>` : ''}}
       <div class="col-body ${{isCompleted ? 'hidden' : ''}}" id="${{bodyId}}">
-        ${{colTasks.length ? colTasks.map(card).join('') : '<div class="empty">No tasks</div>'}}
+        ${{displayTasks.length ? displayTasks.map(card).join('') : '<div class="empty">No tasks</div>'}}
+        ${{moreFooter}}
       </div>`;
 
     board.appendChild(colEl);
@@ -434,6 +590,7 @@ function switchTab(name, el) {{
   el.classList.add('active');
   document.getElementById('tab-' + name).classList.add('active');
   if (name === 'metrics') renderMetrics();
+  if (name === 'retros')  initRetros();
 }}
 
 // ── METRICS RENDERING ────────────────────────────────────────────────────────
@@ -600,8 +757,9 @@ function openModal(id) {{
         ${{field('Started', (t.started_at||'').slice(0,16))}}
         ${{field('Completed', (t.completed_at||'').slice(0,16))}}
         ${{field('Duration', dur)}}
-        ${{field('Cost', t.cost_usd ? '$' + t.cost_usd.toFixed(5) : null)}}
-        ${{field('Tokens In', t.actual_tokens ? t.actual_tokens.toLocaleString() : null)}}
+        ${{field('Cost', (t.cost_usd || t.status === 'failed') ? '$' + (t.cost_usd||0).toFixed(5) : null)}}
+        ${{field('Tokens (actual)', t.actual_tokens ? t.actual_tokens.toLocaleString() : null)}}
+        ${{field('Tokens (est.)', (!t.actual_tokens && t.estimated_tokens) ? t.estimated_tokens.toLocaleString() : null)}}
         ${{field('Model', t.model_used)}}
         ${{field('Commit', t.commit_hash ? t.commit_hash.slice(0,7) : null)}}
       </div>
@@ -609,11 +767,49 @@ function openModal(id) {{
 
     ${{diffBlock}}
 
-    ${{t.rejection_reason ? `
-    <div class="modal-section">
-      <div class="modal-section-label">Rejection / Notes</div>
-      <div style="font-size:12px;color:var(--red);background:var(--surface2);padding:10px;border-radius:8px">${{t.rejection_reason}}</div>
-    </div>` : ''}}
+    ${{(() => {{
+      if (t.status !== 'failed') return '';
+      const errorCode   = (t.notes || '').replace('rejected: ', '');
+      const reasoning   = t.quality_reasoning || '';
+      const issues      = (t.quality_issues || []).join(', ');
+      const rejection   = t.rejection_reason || '';
+      const preview     = t.response_preview || '';
+      const attempts    = t.attempts;
+      const files       = (t.injected_files || []);
+      return `<div class="modal-section">
+        <div class="modal-section-label">Failure Details</div>
+        <div class="modal-grid">
+          ${{errorCode ? `<div class="modal-field" style="border-left:4px solid var(--red)">
+            <div class="modal-field-label">Error</div>
+            <div class="modal-field-value" style="color:var(--red);font-family:monospace">${{errorCode}}</div>
+          </div>` : ''}}
+          ${{attempts != null ? `<div class="modal-field">
+            <div class="modal-field-label">Attempts</div>
+            <div class="modal-field-value">${{attempts}} / 3</div>
+          </div>` : ''}}
+          ${{rejection ? `<div class="modal-field">
+            <div class="modal-field-label">Rejected By</div>
+            <div class="modal-field-value">${{rejection}}</div>
+          </div>` : ''}}
+          ${{issues ? `<div class="modal-field">
+            <div class="modal-field-label">Quality Issues</div>
+            <div class="modal-field-value" style="color:var(--yellow)">${{issues}}</div>
+          </div>` : ''}}
+        </div>
+        ${{reasoning ? `<div class="modal-field" style="margin-top:10px">
+          <div class="modal-field-label">Quality Gate Reasoning</div>
+          <div class="modal-field-value" style="font-weight:400;line-height:1.6;margin-top:4px">${{reasoning}}</div>
+        </div>` : ''}}
+        ${{files.length ? `<div class="modal-field" style="margin-top:10px">
+          <div class="modal-field-label">Files Injected as Context</div>
+          <div class="modal-field-value" style="font-family:monospace;font-size:13px;font-weight:400;line-height:1.8">${{files.join('<br>')}}</div>
+        </div>` : ''}}
+        ${{preview ? `<div style="margin-top:12px">
+          <div class="modal-field-label" style="margin-bottom:6px">MiniMax Response Preview</div>
+          <div class="modal-prompt">${{escHtml(preview)}}</div>
+        </div>` : ''}}
+      </div>`;
+    }})()}}
 
     ${{depBlock}}
     ${{promptBlock}}
@@ -642,6 +838,154 @@ function escHtml(s) {{
 document.addEventListener('keydown', e => {{ if (e.key === 'Escape') closeModal(); }});
 
 render();
+
+// ── RETROS ────────────────────────────────────────────────────────────────────
+
+function renderRetroSidebar() {{
+  const sidebar = document.getElementById('retroSidebar');
+  if (!ALL_RETROS.length) {{
+    sidebar.innerHTML = '<div style="padding:16px;font-size:12px;color:var(--muted)">No retros yet</div>';
+    return;
+  }}
+  sidebar.innerHTML = ALL_RETROS.map((r, i) => {{
+    const s = r.stats || {{}};
+    const label = r.date || 'Unknown';
+    return `<div class="retro-date-item ${{i===0?'active':''}}" onclick="selectRetro(${{i}},this)">
+      <div class="retro-date-label">${{label}}</div>
+      <div class="retro-date-sub">${{s.completed||0}} done · ${{s.failed||0}} failed · $${{(s.total_cost_usd||0).toFixed(3)}}</div>
+    </div>`;
+  }}).join('');
+}}
+
+function selectRetro(idx, el) {{
+  document.querySelectorAll('.retro-date-item').forEach(d => d.classList.remove('active'));
+  el.classList.add('active');
+  renderRetroContent(ALL_RETROS[idx]);
+}}
+
+function retroTaskRow(t, dotColor) {{
+  const meta = [t.project, t.perspective?.replace(/_/g,' '), t.complexity].filter(Boolean).join(' · ');
+  const note = t.notes ? `<div class="retro-task-note">${{escHtml(t.notes.slice(0,80))}}</div>` : '';
+  const score = t.quality_score ? ` · score ${{t.quality_score}}/10` : '';
+  return `<div class="retro-task">
+    <div class="retro-task-dot" style="background:${{dotColor}}"></div>
+    <div class="retro-task-body">
+      <div class="retro-task-desc">${{escHtml(t.description?.slice(0,120) || '')}}</div>
+      <div class="retro-task-meta">${{meta}}${{score}}</div>
+      ${{note}}
+    </div>
+  </div>`;
+}}
+
+function narrativeBlock(label, text) {{
+  if (!text) return '';
+  return `<div class="retro-narrative-block">
+    <div class="retro-narrative-label">${{label}}</div>
+    <div>${{escHtml(text)}}</div>
+  </div>`;
+}}
+
+function renderRetroContent(r) {{
+  const s  = r.stats || {{}};
+  const n  = r.narrative || {{}};
+  const t  = r.tasks || {{}};
+  const completed      = t.completed      || [];
+  const failed         = t.failed         || [];
+  const pending_review = t.pending_review || [];
+
+  const qualityColor = (s.quality_avg || 0) >= 7 ? 'var(--green)' : (s.quality_avg || 0) >= 5 ? 'var(--yellow)' : 'var(--red)';
+
+  const projectBreakdown = Object.entries(s.by_project || {{}})
+    .map(([p, v]) => `<span style="font-size:12px;color:var(--muted)">${{p}}: ${{v.completed}}✓ ${{v.failed}}✗ $${{v.cost.toFixed(3)}}</span>`)
+    .join('  ·  ');
+
+  document.getElementById('retroContent').innerHTML = `
+    <div class="retro-header">
+      <div class="retro-title">📅 ${{r.date}} Retrospective</div>
+      <div class="retro-period">
+        ${{r.window_hours||24}}h window · Generated ${{(r.generated_at||'').slice(0,16)}}
+        ${{projectBreakdown ? `<br><span style="margin-top:4px;display:inline-block">${{projectBreakdown}}</span>` : ''}}
+      </div>
+    </div>
+
+    <div class="retro-stat-row">
+      <div class="retro-stat">
+        <div class="retro-stat-value" style="color:var(--green)">${{s.completed||0}}</div>
+        <div class="retro-stat-label">Completed</div>
+      </div>
+      <div class="retro-stat">
+        <div class="retro-stat-value" style="color:var(--red)">${{s.failed||0}}</div>
+        <div class="retro-stat-label">Failed</div>
+      </div>
+      <div class="retro-stat">
+        <div class="retro-stat-value" style="color:var(--yellow)">${{s.pending_review||0}}</div>
+        <div class="retro-stat-label">Pending Review</div>
+      </div>
+      <div class="retro-stat">
+        <div class="retro-stat-value" style="color:${{qualityColor}}">${{s.quality_avg != null ? s.quality_avg + '/10' : '—'}}</div>
+        <div class="retro-stat-label">Avg Quality</div>
+      </div>
+      <div class="retro-stat">
+        <div class="retro-stat-value">$${{(s.total_cost_usd||0).toFixed(4)}}</div>
+        <div class="retro-stat-label">Total Cost</div>
+      </div>
+    </div>
+
+    ${{Object.keys(r.sprint_features||{{}}).length ? (() => {{
+      const sf = r.sprint_features || {{}};
+      const rows = Object.entries(sf).map(([proj, cats]) => {{
+        const catPills = Object.entries(cats)
+          .sort((a,b) => b[1]-a[1])
+          .map(([cat,n]) => `<span style="background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:12px;margin-right:4px">${{n}} ${{cat}}</span>`)
+          .join('');
+        return `<div class="perspective-row" style="padding:8px 0">
+          <span class="persp-name" style="font-size:13px;font-weight:600">${{proj}}</span>
+          <div>${{catPills}}</div>
+        </div>`;
+      }}).join('');
+      return `<div class="retro-section">
+        <div class="retro-section-title">🚀 Sprint Features Landed (last 7 days)</div>
+        <div class="retro-narrative" style="padding:12px 16px">${{rows}}</div>
+      </div>`;
+    }})() : ''}}
+
+    ${{(n.summary || n.wins || n.failures || n.patterns || n.recommendations || n.sprint_health) ? `
+    <div class="retro-section">
+      <div class="retro-section-title">🤖 Ollama Analysis</div>
+      <div class="retro-narrative">
+        ${{narrativeBlock('Summary', n.summary)}}
+        ${{narrativeBlock('Sprint Health', n.sprint_health)}}
+        ${{narrativeBlock('Wins', n.wins)}}
+        ${{narrativeBlock('Failures', n.failures)}}
+        ${{narrativeBlock('Patterns', n.patterns)}}
+        ${{narrativeBlock('Recommendations', n.recommendations)}}
+      </div>
+    </div>` : ''}}
+
+    ${{completed.length ? `
+    <div class="retro-section">
+      <div class="retro-section-title">✅ Completed (${{completed.length}})</div>
+      <div class="retro-task-list">${{completed.map(t => retroTaskRow(t,'var(--green)')).join('')}}</div>
+    </div>` : ''}}
+
+    ${{failed.length ? `
+    <div class="retro-section">
+      <div class="retro-section-title">❌ Failed (${{failed.length}})</div>
+      <div class="retro-task-list">${{failed.map(t => retroTaskRow(t,'var(--red)')).join('')}}</div>
+    </div>` : ''}}
+
+    ${{pending_review.length ? `
+    <div class="retro-section">
+      <div class="retro-section-title">⏳ Pending Review (${{pending_review.length}})</div>
+      <div class="retro-task-list">${{pending_review.map(t => retroTaskRow(t,'var(--yellow)')).join('')}}</div>
+    </div>` : ''}}
+  `;
+}}
+
+function initRetros() {{
+  renderRetroSidebar();
+  if (ALL_RETROS.length) renderRetroContent(ALL_RETROS[0]);
+}}
 </script>
 </body>
 </html>"""

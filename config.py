@@ -82,7 +82,7 @@ REPO_PATHS: dict[str, Path] = {
 
 MINIMAX_API_BASE  = "https://api.minimax.io/v1"
 MINIMAX_MODEL     = "MiniMax-M3"       # verify at platform.minimax.io before first run
-MINIMAX_SPEND_CAP = 50.0               # USD/month hard cap
+MINIMAX_SPEND_CAP = 50.0               # USD/month hard cap — revisit upward given permanent 50% pricing
 
 OLLAMA_BASE         = "http://localhost:11434"
 OLLAMA_MODEL_CODE   = "qwen3-coder:30b"   # execution prompts, quality gate
@@ -91,7 +91,7 @@ OLLAMA_MODEL_DIGEST = "qwen3:14b"         # digest prose, CONTEXT.md updates (li
 # ── EXECUTION ─────────────────────────────────────────────────────────────────
 
 MAX_RETRIES             = 3
-QUEUE_REFILL_THRESHOLD  = 10
+QUEUE_REFILL_THRESHOLD  = 3    # fire council when < 3 unblocked tasks remain
 RETRY_BACKOFF_SECONDS   = [5, 15, 30]
 
 # ── SPRINT STATE ──────────────────────────────────────────────────────────────

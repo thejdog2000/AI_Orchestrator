@@ -454,7 +454,7 @@ def _minimax_chat(
     )
 
 
-def select_relevant_files(task: dict, repo_path: Path, context_md: str, max_files: int = 20) -> list[str]:
+def select_relevant_files(task: dict, repo_path: Path, context_md: str, max_files: int = 10) -> list[str]:
     """
     Ask Ollama which files in the repo are most relevant to this task.
     Uses git ls-files for an accurate, .gitignore-respecting file list.
@@ -476,7 +476,8 @@ def select_relevant_files(task: dict, repo_path: Path, context_md: str, max_file
     # so asking for a bare array conflicts with how Ollama implements json_mode.
     # Controlling the key means we always know exactly where to find the list.
     prompt = (
-        f"List the {max_files} source files most relevant to this coding task.\n"
+        f"List UP TO {max_files} source files most relevant to this coding task.\n"
+        f"Return FEWER if fewer are genuinely needed — do not pad the list.\n"
         f"Only include files that exist in the file tree below.\n"
         f"Prioritise files that will need to be read or modified to complete the task.\n\n"
         f"TASK: {task['description']}\n"
@@ -502,8 +503,15 @@ def select_relevant_files(task: dict, repo_path: Path, context_md: str, max_file
         log.warning(f"[{task['project']}] select_relevant_files returned nothing — no file context injected")
         return []
 
-    # Validate each path actually exists in the repo
-    valid = [p for p in paths if isinstance(p, str) and (repo_path / p).exists()][:max_files]
+    # Validate each path actually exists in the repo; deduplicate preserving order
+    seen  = set()
+    valid = []
+    for p in paths:
+        if isinstance(p, str) and (repo_path / p).exists() and p not in seen:
+            seen.add(p)
+            valid.append(p)
+            if len(valid) >= max_files:
+                break
     if not valid:
         log.warning(f"[{task['project']}] select_relevant_files returned no valid paths: {list(paths)[:5]}")
     return valid

@@ -126,12 +126,18 @@ def _minimax_chat(
             "Content-Type":  "application/json",
         },
         json=payload,
-        timeout=300,
+        timeout=600,
     )
     resp.raise_for_status()
     data = resp.json()
     log.debug(f"MiniMax usage: {data.get('usage', {})}")
-    return data["choices"][0]["message"]["content"]
+    msg = data["choices"][0]["message"]
+    # MiniMax-M3 may emit output in reasoning_content when content is empty
+    content = msg.get("content") or msg.get("reasoning_content") or ""
+    # Strip thinking tags if present
+    if "</think>" in content:
+        content = content.split("</think>", 1)[-1].strip()
+    return content
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────

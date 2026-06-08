@@ -11,12 +11,15 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-# Rates are set here — update when promo expires (verify at platform.minimax.io)
+# Rates — verify at platform.minimax.io if switching models.
+# MiniMax M3 50% off is PERMANENT as of 2026-06-08 announcement (no expiry).
+# Note: tracked spend.json is ~$0.27 below MiniMax billing total due to
+# untracked timeout retries before the no-retry-on-timeout fix (2026-06-08).
 MINIMAX_RATES = {
-    "minimax-m3":   (0.30, 1.20),   # M3 promo rate (7-day 50% off, then 0.60/2.40)
+    "minimax-m3":   (0.30, 1.20),   # M3 permanent rate: $0.30/M in, $1.20/M out
     "minimax-m2.7": (0.30, 1.20),   # M2.7 standard rate
 }
-DEFAULT_RATE = (0.60, 2.40)         # conservative fallback — full rate, no promo assumed
+DEFAULT_RATE = (0.30, 1.20)         # M3 permanent rate — update if adding non-M3 models
 
 
 class SpendTracker:

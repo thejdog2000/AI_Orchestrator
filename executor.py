@@ -282,6 +282,80 @@ def update_context_md(task: dict, diff_text: str, repo_path: Path) -> bool:
     return False
 
 
+# ── PBI FEEDBACK HELPERS ──────────────────────────────────────────────────────
+
+def generate_pbi_handoff(task: dict, diff_text: str, pbi: dict) -> str:
+    """
+    Ollama writes a compact (~150 word) summary of what this task did,
+    scoped to what the next PBI task needs to know.
+    Non-blocking — returns "" on failure.
+    """
+    prompt = (
+        f"Write a 100-150 word handoff note for the NEXT developer working on this feature.\n"
+        f"Focus on: what was added/changed, any new functions/fields created, "
+        f"and what the next task should build on top of.\n"
+        f"Be specific and technical. No preamble.\n\n"
+        f"PBI: {pbi['title']}\n"
+        f"COMPLETED TASK: {task['description']}\n\n"
+        f"DIFF:\n{diff_text[:3000]}\n\n"
+        f"Handoff note:"
+    )
+    result = ollama_generate(prompt, max_tokens=250, model=_cfg("OLLAMA_MODEL_DIGEST"), temperature=0.2)
+    return result.strip() if result and len(result) > 30 else ""
+
+
+def _extract_new_files_from_diff(diff_text: str, existing_files: list) -> list:
+    """
+    Parse a git diff for files that were newly created (not just modified).
+    Returns relative paths not already in existing_files.
+    New files appear as: diff --git a/path b/path with --- /dev/null
+    """
+    new_files = []
+    lines     = diff_text.splitlines()
+    current   = None
+    for line in lines:
+        if line.startswith("diff --git "):
+            # Extract b/ path: "diff --git a/foo b/foo" → "foo"
+            parts = line.split(" b/", 1)
+            current = parts[1].strip() if len(parts) == 2 else None
+        elif line.startswith("--- /dev/null") and current:
+            if current not in existing_files and current not in new_files:
+                new_files.append(current)
+    return new_files
+
+
+# ── QUESTION DETECTION ────────────────────────────────────────────────────────
+
+_QUESTION_PHRASES = re.compile(
+    r"(could you (?:please )?(?:clarify|provide|confirm|specify|share|tell me)|"
+    r"(?:i |I )(?:need|would need|require) (?:more |additional )?(?:information|context|clarification|details)|"
+    r"before (?:i |I )(?:proceed|implement|make|start|begin)|"
+    r"what (?:is|are|should|would) (?:the )?(?:expected|correct|intended|preferred)|"
+    r"(?:please )?(?:clarify|confirm|specify) (?:which|what|how|whether)|"
+    r"can you (?:clarify|confirm|provide|share|tell)|"
+    r"(?:i am|I'm) (?:not sure|unclear|unsure) (?:about|how|what|whether))",
+    re.IGNORECASE,
+)
+
+def _detect_question(content: str, thinking_block: str) -> str:
+    """
+    Return the question text if the model asked for clarification instead of
+    producing code, otherwise return "".
+    Checks both content and thinking block (model sometimes reasons about
+    missing context even when content is short).
+    """
+    # Must have no file blocks (caller already checked) and contain question signals
+    combined    = (content + " " + thinking_block)[:3000]
+    q_marks     = combined.count("?")
+    phrase_hit  = bool(_QUESTION_PHRASES.search(combined))
+
+    if q_marks >= 2 and phrase_hit:
+        # Extract the first ~400 chars of actual content as the question text
+        question_src = content.strip() or thinking_block.strip()
+        return question_src[:400]
+    return ""
+
+
 # ── MINIMAX EXECUTION ─────────────────────────────────────────────────────────
 
 _FILE_PATTERN = re.compile(r"<<<FILE:\s*(.+?)>>>\s*\n(.*?)<<<END>>>", re.DOTALL)
@@ -487,15 +561,28 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
     if pbi_id:
         try:
             from task_queue import TaskQueue
-            pbi = TaskQueue(_cfg("DB_PATH")).get_pbi(pbi_id)
+            _tq  = TaskQueue(_cfg("DB_PATH"))
+            pbi  = _tq.get_pbi(pbi_id)
             if pbi:
+                # Build handoff notes block from previous PBI tasks
+                handoff_notes = _tq.get_pbi_handoff_notes(pbi_id)
+                handoff_block = ""
+                if handoff_notes:
+                    notes_text = "\n".join(
+                        f"- [{tid}]: {summary}"
+                        for tid, summary in list(handoff_notes.items())[-3:]  # last 3 tasks
+                    )
+                    handoff_block = f"### What Previous Tasks Built\n{notes_text}\n\n"
+
                 pbi_header = (
                     f"## PARENT PBI: {pbi['title']}\n"
                     f"{pbi['description']}\n\n"
                     f"### Acceptance Criteria\n{pbi['acceptance_criteria']}\n\n"
+                    f"{handoff_block}"
                 )
                 pbi_files = pbi.get("affected_files", [])
-                log.info(f"[{project}] PBI {pbi_id} injected — {len(pbi_files)} pre-specified files")
+                log.info(f"[{project}] PBI {pbi_id} injected — {len(pbi_files)} files, "
+                         f"{len(handoff_notes)} handoff note(s)")
         except Exception as _e:
             log.warning(f"[{project}] PBI load failed ({_e}) — falling back to file discovery")
 
@@ -575,6 +662,23 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
             )
             error = "empty_after_think"
         else:
+            # Check if model asked a clarifying question instead of producing code
+            question = _detect_question(content, thinking_block)
+            if question:
+                log.warning(f"[{project}] {task['id']} — model asked a question: {question[:200]}")
+                return {
+                    "success":          False,
+                    "error":            "model_asked_question",
+                    "question":         question,
+                    "ollama_prompt":    task_prompt,
+                    "injected_files":   relevant,
+                    "thinking_block":   thinking_block,
+                    "output_content":   content,
+                    "response_preview": preview,
+                    "input_tokens":     input_tokens,
+                    "output_tokens":    output_tokens,
+                    "cached_tokens":    cached_tokens,
+                }
             log.warning(f"[{project}] No file blocks for {task['id']}. "
                         f"Output preview: {preview[:400]}")
             error = "no_file_blocks"
@@ -757,10 +861,14 @@ def run_task(task: dict, spend_tracker, task_queue):
         error = result.get("error", "")
 
         # Don't retry timeouts — the prompt is fine, the API is just slow.
-        # Retrying immediately burns identical input tokens for no gain.
-        # Mark failed so the task re-queues cleanly on the next scheduler cycle.
         if "timed out" in error:
             log.warning(f"[{project}] Timeout on attempt {attempt + 1} — skipping retries to save tokens")
+            break
+
+        # Don't retry questions — retrying with the same context won't answer them.
+        # Surface to human via Discord instead.
+        if error == "model_asked_question":
+            log.warning(f"[{project}] Model asked a question on attempt {attempt + 1} — blocking task")
             break
 
         wait = backoff[min(attempt, len(backoff) - 1)]
@@ -789,9 +897,19 @@ def run_task(task: dict, spend_tracker, task_queue):
         except Exception as _e:
             log.warning(f"[{project}] Pipeline log write failed: {_e}")
 
-    # All attempts exhausted
+    # All attempts exhausted (or broke out early)
     if not result or not result["success"]:
         error = str(result.get("error", "unknown")) if result else "no_result"
+
+        # ── QUESTION BLOCK ────────────────────────────────────────────────────
+        if error == "model_asked_question":
+            question = result.get("question", "") if result else ""
+            log.warning(f"[{project}] {task['id']} blocked — model needs clarification")
+            _write_pipeline_log("blocked")
+            task_queue.mark_blocked(task, question=question)
+            _notify().task_blocked_on_question(task, question)
+            return
+
         log.error(f"[{project}] {task['id']} failed after {attempts_made} attempts")
 
         # Record partial spend for any timeout attempts — MiniMax bills input tokens
@@ -899,6 +1017,29 @@ def run_task(task: dict, spend_tracker, task_queue):
         result["commit_hash"] = commit_hash
         _notify().task_committed(task, result, monthly, cap)
         log.info(f"[{project}] {task['id']} auto-committed ({commit_hash})")
+
+        # ── PBI POST-COMMIT HOOKS (Gaps 1 + 2) ───────────────────────────────
+        pbi_id = task.get("pbi_id")
+        if pbi_id and result.get("diff_text"):
+            try:
+                from task_queue import TaskQueue as _TQ
+                _tq2 = _TQ(_cfg("DB_PATH"))
+                _pbi = _tq2.get_pbi(pbi_id)
+                if _pbi:
+                    # Gap 1: generate and store handoff note for next PBI task
+                    handoff = generate_pbi_handoff(task, result["diff_text"], _pbi)
+                    if handoff:
+                        _tq2.update_pbi_handoff(pbi_id, task["id"], handoff)
+                        log.info(f"[{project}] PBI handoff note stored ({len(handoff)} chars)")
+
+                    # Gap 2: discover new files created by this task
+                    new_files = _extract_new_files_from_diff(
+                        result["diff_text"], _pbi.get("affected_files", [])
+                    )
+                    if new_files:
+                        _tq2.update_pbi_affected_files(pbi_id, new_files)
+            except Exception as _e:
+                log.warning(f"[{project}] PBI post-commit hooks failed ({_e}) — non-fatal")
 
     # Refill task queue if running low
     if task_queue.total_unblocked(projects=enabled_projects) < refill_threshold:

@@ -325,6 +325,7 @@ def _handle_requeue(target: str) -> str:
     conn.commit()
     conn.close()
 
+
     notify.post("live", f"🔁  **[{task['project']}]** Task requeued: `{target}`")
     return f"🔁 Requeued `{target}` — [{task['project']}] {task['description'][:60]}"
 

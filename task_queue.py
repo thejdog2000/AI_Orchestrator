@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS pbis (
     description          TEXT DEFAULT '',
     acceptance_criteria  TEXT DEFAULT '',
     affected_files       TEXT DEFAULT '[]',  -- JSON array of repo-relative paths
+    handoff_notes        TEXT DEFAULT '{}',  -- JSON {task_id: "150-word summary"} per completed task
     status               TEXT DEFAULT 'active',  -- active | complete | cancelled
     created_at           TEXT
 );
@@ -215,7 +216,8 @@ class TaskQueue:
             "started_at", "completed_at", "committed_at", "commit_hash",
             "diff_path", "aider_prompt", "system_prompt", "quality_gate_skipped",
             "rejection_reason", "rejected_at",
-            "actual_tokens", "cost_usd", "model_used", "quality_score", "notes"
+            "actual_tokens", "cost_usd", "model_used", "quality_score", "notes",
+            "pbi_id",
         }
         fields = {k: v for k, v in kwargs.items() if k in allowed}
         fields["status"] = status
@@ -347,6 +349,47 @@ class TaskQueue:
             d["affected_files"] = json.loads(d.get("affected_files") or "[]")
             result.append(d)
         return result
+
+    def mark_blocked(self, task: dict, question: str = "") -> None:
+        """Mark a task as blocked because the model asked a clarifying question."""
+        self.update_status(
+            task["id"], "blocked",
+            notes=f"model_question: {question[:500]}" if question else "blocked: model asked question",
+            completed_at=datetime.now().isoformat(),
+        )
+        log.info(f"[{task['project']}] {task['id']} → blocked (model asked question)")
+
+    def update_pbi_handoff(self, pbi_id: str, task_id: str, summary: str) -> None:
+        """Store a post-task handoff summary for the next PBI task to read."""
+        with self._conn() as conn:
+            row = conn.execute("SELECT handoff_notes FROM pbis WHERE id=?", (pbi_id,)).fetchone()
+            if not row:
+                return
+            notes = json.loads(row[0] or "{}")
+            notes[task_id] = summary
+            conn.execute("UPDATE pbis SET handoff_notes=? WHERE id=?",
+                         (json.dumps(notes), pbi_id))
+
+    def get_pbi_handoff_notes(self, pbi_id: str) -> dict:
+        """Return {task_id: summary} for all completed tasks in this PBI."""
+        with self._conn() as conn:
+            row = conn.execute("SELECT handoff_notes FROM pbis WHERE id=?", (pbi_id,)).fetchone()
+        return json.loads(row[0] or "{}") if row else {}
+
+    def update_pbi_affected_files(self, pbi_id: str, new_files: list) -> None:
+        """Append newly discovered files to pbi.affected_files (no duplicates)."""
+        if not new_files:
+            return
+        with self._conn() as conn:
+            row = conn.execute("SELECT affected_files FROM pbis WHERE id=?", (pbi_id,)).fetchone()
+            if not row:
+                return
+            existing = json.loads(row[0] or "[]")
+            merged   = existing + [f for f in new_files if f not in existing]
+            conn.execute("UPDATE pbis SET affected_files=? WHERE id=?",
+                         (json.dumps(merged), pbi_id))
+        if new_files:
+            log.info(f"PBI {pbi_id}: added {len(new_files)} new file(s) to affected_files: {new_files}")
 
     def tasks_for_pbi(self, pbi_id: str) -> list[dict]:
         with self._conn() as conn:

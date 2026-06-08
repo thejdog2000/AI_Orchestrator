@@ -162,6 +162,14 @@ def task_failed(task: dict, error: str, attempts: int) -> bool:
     return post("live", msg)
 
 
+def task_blocked_on_question(task: dict, question: str) -> bool:
+    """Post to #live and #blocked when a model asks a clarifying question."""
+    desc = task.get("description", "")[:60]
+    post("live", f"❓  **[{task['project']}]** `{task['id']}` blocked — model needs clarification")
+    return blocked_embed(task, reason="model_question",
+                         detail=f"**Model asked:**\n{question[:600]}")
+
+
 def quality_gate_failed(task: dict, reasoning: str) -> bool:
     """Post to #live and #blocked when Ollama quality gate rejects a diff."""
     desc = task.get("description", "")[:60]
@@ -183,6 +191,7 @@ def blocked_embed(task: dict, reason: str, detail: str = "", blocked_since: str 
         "approval_required":   _COLOR_RED,
         "quality_gate_failed": _COLOR_ORANGE,
         "repeated_failure":    _COLOR_ORANGE,
+        "model_question":      _COLOR_ORANGE,
     }
     color = color_map.get(reason, _COLOR_RED)
 
@@ -190,6 +199,7 @@ def blocked_embed(task: dict, reason: str, detail: str = "", blocked_since: str 
         "approval_required":   "🔴 APPROVAL REQUIRED",
         "quality_gate_failed": "⚠️ QUALITY GATE FAILED",
         "repeated_failure":    "⚠️ REPEATED FAILURE",
+        "model_question":      "❓ MODEL NEEDS CLARIFICATION",
     }
     title = title_map.get(reason, "🔴 BLOCKED")
 

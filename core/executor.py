@@ -867,9 +867,19 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
     skipped_readonly = []
     shrink_flagged   = []   # written but flagged for human approval
 
+    def _in_writable(path: str) -> bool:
+        """Exact match OR suffix match — handles MiniMax using slightly different
+        path prefixes than affected_files (e.g. src/persistence.js vs persistence.js)."""
+        if path in writable_set:
+            return True
+        for w in writable_set:
+            if path.endswith("/" + w) or w.endswith("/" + path):
+                return True
+        return False
+
     for rel_path, file_content in file_blocks.items():
-        # PBI enforcement: file must be in affected_files to be written
-        if writable_set is not None and rel_path not in writable_set:
+        # PBI enforcement: file must match (exact or suffix) an entry in affected_files
+        if writable_set is not None and not _in_writable(rel_path):
             skipped_readonly.append(rel_path)
             log.warning(f"[{project}] Skipped read-only context file: {rel_path}")
             continue

@@ -51,10 +51,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._not_found()
 
     def _serve_dashboard(self):
-        # Regenerate on request so data is always current
+        # Regenerate on request so data is always current.
+        # importlib.reload() ensures edits to dashboard_generator.py are picked up
+        # without restarting the server — critical during development.
         try:
-            from dashboard_generator import generate
-            generate()
+            import importlib
+            import dashboard_generator
+            importlib.reload(dashboard_generator)
+            dashboard_generator.generate()
         except Exception as e:
             log.warning(f"Dashboard regeneration failed: {e} — serving cached version")
 

@@ -38,6 +38,7 @@ from task_queue  import TaskQueue
 from dashboard_generator import generate as generate_dashboard
 from task_generator      import generate_tasks_all_projects
 from pipeline.lang_pipeline import run_nightly as run_lang_nightly
+from retro_generator     import generate_retrospective
 
 # ── LOGGING ───────────────────────────────────────────────────────────────────
 
@@ -229,6 +230,17 @@ scheduler.add_job(
     "cron", hour=20, minute=0, id="evening_digest",
 )
 scheduler.add_job(backup_db, "cron", hour=3, minute=0, id="db_backup")
+
+def _run_retrospective():
+    """Generate daily retro at midnight, then refresh the dashboard."""
+    try:
+        generate_retrospective(hours=24)
+        generate_dashboard()
+        log.info("Daily retrospective generated")
+    except Exception as e:
+        log.error(f"Retrospective generation failed: {e}")
+
+scheduler.add_job(_run_retrospective, "cron", hour=22, minute=0, id="daily_retro")
 
 
 def _run_lang_nightly_with_notify():

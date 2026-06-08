@@ -54,8 +54,8 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # Silence noisy APScheduler job-lifecycle chatter — only show warnings+
-logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
-logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
+logging.getLogger("apscheduler.executors.default").setLevel(logging.ERROR)
+logging.getLogger("apscheduler.scheduler").setLevel(logging.ERROR)
 
 # ── MODULE INIT ───────────────────────────────────────────────────────────────
 

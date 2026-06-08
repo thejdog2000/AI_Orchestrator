@@ -87,6 +87,7 @@ MINIMAX_SPEND_CAP = 50.0               # USD/month hard cap — revisit upward g
 OLLAMA_BASE         = "http://localhost:11434"
 OLLAMA_MODEL_CODE   = "qwen3-coder:30b"   # execution prompts, quality gate
 OLLAMA_MODEL_DIGEST = "qwen3:14b"         # digest prose, CONTEXT.md updates (lighter)
+COUNCIL_TEMPERATURE = float(os.environ.get("COUNCIL_TEMPERATURE", "0.75"))  # task generation creativity
 
 # ── EXECUTION ─────────────────────────────────────────────────────────────────
 
@@ -162,6 +163,7 @@ CFG = {
     "OLLAMA_BASE":            OLLAMA_BASE,
     "OLLAMA_MODEL_CODE":      OLLAMA_MODEL_CODE,
     "OLLAMA_MODEL_DIGEST":    OLLAMA_MODEL_DIGEST,
+    "COUNCIL_TEMPERATURE":    COUNCIL_TEMPERATURE,
     "DASHBOARD_PORT":          DASHBOARD_PORT,
     "METRICS_INTERVAL_HOURS":  METRICS_INTERVAL_HOURS,
 }

@@ -329,6 +329,11 @@ def update_context_md(task: dict, diff_text: str, repo_path: Path) -> bool:
         return True
 
     log.warning(f"[{task['project']}] CONTEXT.md update skipped — Ollama returned nothing useful")
+    try:
+        import notify as _notify_mod
+        _notify_mod.post("live", f"⚠️ **[{task['project']}]** CONTEXT.md update failed — next task runs against stale context")
+    except Exception:
+        pass
     return False
 
 
@@ -1010,7 +1015,13 @@ def _auto_commit(task: dict, repo_path: Path) -> str:
             log.info(f"[{project}] Committing to branch pbi/{pbi_id}")
 
     try:
-        subprocess.run(["git", "add", "-A"], cwd=repo_path, capture_output=True, check=True)
+        # Stage only the files written by this task — not git add -A which
+        # would silently commit Jacob's manual edits or untracked scratch files.
+        files_written = task.get("files_written") or []
+        if files_written:
+            subprocess.run(["git", "add", "--"] + files_written, cwd=repo_path, capture_output=True, check=True)
+        else:
+            subprocess.run(["git", "add", "-A"], cwd=repo_path, capture_output=True, check=True)
         result = subprocess.run(
             ["git", "commit", "-m", msg],
             cwd=repo_path, capture_output=True, text=True,
@@ -1263,6 +1274,7 @@ def run_task(task: dict, spend_tracker, task_queue):
         log.info(f"[{project}] {task['id']} → failed (approval_required — diff saved for review)")
         _notify().task_pending_review(task)
     else:
+        task["files_written"] = result.get("files_written", [])
         commit_hash = _auto_commit(task, repo_path)
         task_queue.mark_committed(
             task,

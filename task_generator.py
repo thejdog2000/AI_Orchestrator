@@ -32,7 +32,7 @@ from task_queue import TaskQueue
 from executor   import load_context
 from config     import (
     MINIMAX_API_BASE, MINIMAX_MODEL, REPO_PATHS, BASE_DIR, DB_PATH,
-    PERSPECTIVE_PROJECT_MAP,
+    PERSPECTIVE_PROJECT_MAP, COUNCIL_TEMPERATURE,
 )
 
 _personas_env = os.environ.get("ORCHESTRATOR_PERSONAS_DIR")
@@ -293,7 +293,7 @@ Only output the 3 tasks in the format above. No preamble."""
             {"role": "user",   "content": user},
         ],
         json_mode=False,
-        temperature=0.75,
+        temperature=COUNCIL_TEMPERATURE,
         max_tokens=900,
     )
 

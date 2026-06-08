@@ -725,13 +725,38 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
     if relevant:
         log.info(f"[{project}] Injecting {len(relevant)} files into prompt: {relevant}")
 
-    # File context goes first in the system prompt so MiniMax's automatic prefix
-    # caching kicks in — same files across tasks for a project = cache hits at $0.06/M.
-    system = (
-        (f"EXISTING FILES (read carefully before modifying):\n\n{file_ctx}\n\n" if file_ctx else "")
-        + (pbi_header if pbi_header else "")
-        + task_prompt
-    )
+    # Split injected files into READ-ONLY context vs writable targets.
+    # For PBI tasks: pbi_files are the writable targets; anything else is context-only.
+    # For flat tasks: all files are potentially writable (no PBI constraint).
+    if pbi_files and relevant:
+        writable_files  = [f for f in relevant if f in pbi_files]
+        readonly_files  = [f for f in relevant if f not in pbi_files]
+    else:
+        writable_files  = relevant
+        readonly_files  = []
+
+    writable_ctx  = _load_file_context(repo_path, writable_files)  if writable_files  else ""
+    readonly_ctx  = _load_file_context(repo_path, readonly_files)  if readonly_files  else ""
+
+    # File context goes first so MiniMax's prefix caching kicks in.
+    context_block = ""
+    if readonly_ctx:
+        context_block += (
+            f"READ-ONLY CONTEXT FILES (understand these but do NOT output them):\n\n"
+            f"{readonly_ctx}\n\n"
+            f"{'─'*60}\n\n"
+        )
+    if writable_ctx:
+        context_block += (
+            f"FILES YOU MAY MODIFY (output these if changed):\n\n"
+            f"{writable_ctx}\n\n"
+            f"{'─'*60}\n\n"
+        )
+    elif file_ctx:
+        # flat task fallback — keep original behaviour
+        context_block = f"EXISTING FILES (read carefully before modifying):\n\n{file_ctx}\n\n"
+
+    system = context_block + (pbi_header if pbi_header else "") + task_prompt
 
     user_msg = (
         f"Task: {task['description']}\n\n"
@@ -821,13 +846,54 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
             "cached_tokens":    cached_tokens,
         }
 
-    written = []
+    # For PBI tasks, only allow output for files in affected_files.
+    # Context files injected outside that list are read-only — skip any
+    # that MiniMax outputs for them to prevent context-rewrite truncation.
+    writable_set = set(pbi_files) if pbi_files else None   # None = all files writable (flat task)
+
+    # Effort categories where intentional large shrinkage is expected.
+    # Refactors split files, scaffolds replace boilerplate, cleanup removes dead code.
+    # These skip the shrinkage check entirely — trust the task category.
+    SHRINK_EXEMPT = {"refactor", "scaffold", "gap-fill"}
+    effort        = task.get("effort_category", "feature")
+    check_shrink  = effort not in SHRINK_EXEMPT
+
+    written          = []
+    skipped_readonly = []
+    shrink_flagged   = []   # written but flagged for human approval
+
     for rel_path, file_content in file_blocks.items():
+        # PBI enforcement: file must be in affected_files to be written
+        if writable_set is not None and rel_path not in writable_set:
+            skipped_readonly.append(rel_path)
+            log.warning(f"[{project}] Skipped read-only context file: {rel_path}")
+            continue
+
+        # Pre-write shrinkage check for non-exempt effort categories.
+        # Rather than silently skipping, write the file but flag the task
+        # for human approval — better to review a suspicious diff than lose changes.
+        if check_shrink:
+            existing = repo_path / rel_path
+            if existing.exists():
+                existing_lines = existing.read_text(errors="ignore").count("\n") + 1
+                new_lines      = file_content.count("\n") + 1
+                if existing_lines >= 20 and new_lines < existing_lines * 0.4:
+                    shrink_flagged.append(
+                        f"{rel_path} ({existing_lines}→{new_lines} lines, "
+                        f"{round(new_lines/existing_lines*100)}% of original)"
+                    )
+                    log.warning(f"[{project}] Shrinkage flagged (will write + request approval): {rel_path}")
+
         if _safe_write(repo_path, rel_path, file_content):
             log.info(f"[{project}] Wrote {rel_path}")
             written.append(rel_path)
         else:
             log.warning(f"[{project}] Skipped unsafe path: {rel_path}")
+
+    if skipped_readonly:
+        log.info(f"[{project}] {len(skipped_readonly)} read-only context file(s) skipped: {skipped_readonly}")
+    if shrink_flagged:
+        log.warning(f"[{project}] {len(shrink_flagged)} file(s) shrank >60% — flagging task for approval: {shrink_flagged}")
 
     if not written:
         log.error(f"[{project}] All file writes blocked for {task['id']} — possible path traversal")
@@ -849,7 +915,9 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
         "success":        True,
         "diff_path":      diff_path,
         "diff_text":      diff_text,
-        "files_written":  list(file_blocks.keys()),
+        "files_written":  written,
+        "skipped_readonly": skipped_readonly,
+        "shrink_flagged": shrink_flagged,   # non-empty → force approval in run_task
         "injected_files": relevant,
         "ollama_prompt":  task_prompt,
         "thinking_block": thinking_block,
@@ -1178,8 +1246,16 @@ def run_task(task: dict, spend_tracker, task_queue):
         str(result.get("diff_path", "")),
     )
 
+    # Shrinkage detected on a non-exempt task → force human review regardless
+    # of whether approval_required was set originally.
+    shrink_flagged = result.get("shrink_flagged", [])
+    if shrink_flagged and not task.get("approval_required"):
+        log.warning(f"[{project}] Forcing approval_required due to file shrinkage: {shrink_flagged}")
+        task["approval_required"] = True
+
     if task.get("approval_required"):
-        task_queue.mark_failed(task, notes="needs approval — review diff before committing")
+        shrink_note = f" | shrank: {shrink_flagged}" if shrink_flagged else ""
+        task_queue.mark_failed(task, notes=f"needs approval — review diff before committing{shrink_note}")
         task_queue.update_status(task["id"], "failed",
                                  diff_path=str(result["diff_path"]),
                                  quality_score=evaluation.get("score", 0),

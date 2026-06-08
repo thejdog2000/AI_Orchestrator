@@ -398,3 +398,27 @@ export DISCORD_CHANNEL_METRICS="..."   # new channel ID
 ```
 
 Hold until system is stable and running consistently overnight.
+
+---
+
+## 🔴 FEAT-ClaudeCouncil: Replace MiniMax Council with Claude Scheduled Task
+
+**Replace the council pipeline (task_generator.py) with a scheduled Claude (Cowork) task.**
+
+**Why:** Claude has direct file access to all project repos, reads real source files, and generates tasks that reference actual functions/paths/variables. The current council makes 3–4 MiniMax API calls per refill (~$0.05/run) using local Ollama models to write prompts — Claude does this better for free, using Cowork's scheduled task infrastructure.
+
+**What it does:**
+1. Fires on a schedule (e.g. 7am daily) or when queue drops below threshold
+2. Reads `orchestrator.db` to check queue depth per project
+3. Reads each project's `CONTEXT.md` + key source files
+4. Generates 5–8 tasks per project using `AGENT_TASK_GEN.md` as context
+5. Injects tasks directly into the DB via the injection script
+
+**Keep council as fallback** for gap-fill and creativity when Claude isn't available. Primary overnight refill switches to Claude.
+
+**Files to touch:**
+- `orchestrator_main.py` — make council refill conditional (skip if queue was just filled by Claude)
+- `task_generator.py` — demote to gap-fill fallback only
+- New: Cowork scheduled task prompt using `AGENT_TASK_GEN.md`
+
+**Prerequisite:** `~/projects` mounted in Cowork (✓ done 2026-06-08) so Claude can read all repos.

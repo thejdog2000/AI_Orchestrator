@@ -11,13 +11,33 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from config import DB_PATH, PENDING_DIR, PROJECT_COLORS, PERSPECTIVES, EFFORT_CATEGORIES
+from config import DB_PATH, PENDING_DIR, RETROS_DIR, LOGS_DIR, PROJECT_COLORS, PERSPECTIVES, EFFORT_CATEGORIES
 
 try:
     from retro_generator import load_all_retros
 except ImportError:
     def load_all_retros():
         return []
+
+
+def _load_real_spend() -> dict:
+    """
+    Read spend.json for the true monthly/daily totals.
+    The DB cost_usd only covers successful tasks — failed API calls are tracked
+    separately in spend.json by SpendTracker.
+    """
+    spend_file = LOGS_DIR / "spend.json"
+    if not spend_file.exists():
+        return {"monthly": 0.0, "daily": 0.0, "total": 0.0}
+    try:
+        data  = json.loads(spend_file.read_text())
+        month = datetime.now().strftime("%Y-%m")
+        today = datetime.now().strftime("%Y-%m-%d")
+        monthly = sum(v["usd"] for k, v in data.get("daily", {}).items() if k.startswith(month))
+        daily   = data.get("daily", {}).get(today, {}).get("usd", 0.0)
+        return {"monthly": round(monthly, 4), "daily": round(daily, 4), "total": round(data.get("total_usd", 0.0), 4)}
+    except Exception:
+        return {"monthly": 0.0, "daily": 0.0, "total": 0.0}
 
 
 def _load_metrics() -> dict:
@@ -119,10 +139,12 @@ def generate() -> Path:
     generated   = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     retros       = load_all_retros()
+    real_spend   = _load_real_spend()
     tasks_json   = json.dumps(tasks, default=str)
     colors_json  = json.dumps(PROJECT_COLORS)
     metrics_json = json.dumps(metrics, default=str)
     retros_json  = json.dumps(retros, default=str)
+    spend_json   = json.dumps(real_spend)
 
     # Pre-computed to avoid backslashes inside f-string expressions (Python 3.9 compat)
     project_pills = " ".join(
@@ -196,8 +218,53 @@ def generate() -> Path:
   .stat {{ font-size: 11px; color: var(--muted); }}
   .stat span {{ color: var(--text); font-weight: 600; font-size: 13px; }}
 
-  /* ── BOARD ── */
-  .board {{ display: flex; gap: 12px; padding: 16px 20px; min-height: calc(100vh - 160px); }}
+  /* ── SWIMLANE BOARD ── */
+  .board {{
+    display: grid;
+    grid-template-columns: 100px repeat(5, 1fr);
+    gap: 0;
+    padding: 0 20px 20px;
+    min-height: calc(100vh - 160px);
+    overflow-x: auto;
+  }}
+  /* Status header row */
+  .board-col-header {{
+    position: sticky; top: 0; z-index: 10;
+    background: var(--bg); padding: 10px 8px 8px;
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .6px; color: var(--muted);
+    display: flex; align-items: center; gap: 6px;
+    border-bottom: 1px solid var(--border);
+  }}
+  .board-col-header.first {{ border-right: 1px solid var(--border); }}
+  .board-col-header .col-dot {{
+    width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  }}
+  /* Project label cells */
+  .project-label {{
+    position: sticky; left: 0; z-index: 5;
+    background: var(--bg); border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 8px; display: flex; align-items: flex-start;
+    padding-top: 12px;
+  }}
+  .project-label-inner {{
+    writing-mode: horizontal-tb;
+    font-size: 11px; font-weight: 700; letter-spacing: .4px;
+    color: var(--text); display: flex; align-items: center; gap: 6px;
+  }}
+  .project-dot-label {{
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  }}
+  /* Task cells */
+  .swim-cell {{
+    padding: 6px; border-bottom: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 5px;
+    min-height: 60px; background: var(--bg);
+  }}
+  .swim-cell.empty {{ background: var(--bg); }}
+  /* Column (kept for backward compat with card styles) */
   .column {{
     flex: 1 1 0; min-width: 0; background: var(--surface); border-radius: 10px;
     border: 1px solid var(--border); display: flex; flex-direction: column;
@@ -445,12 +512,12 @@ const ALL_TASKS   = {tasks_json};
 const COLORS      = {colors_json};
 const METRICS     = {metrics_json};
 const ALL_RETROS  = {retros_json};
+const REAL_SPEND  = {spend_json};
 const COLUMNS     = [
-  {{ key: 'queued',         label: 'Queued',                dot: '#94a3b8' }},
-  {{ key: 'running',        label: 'Running',               dot: '#3b82f6' }},
-  {{ key: 'pending_review', label: 'Needs Approval',        dot: '#f59e0b' }},
-  {{ key: 'completed',      label: 'Committed / Completed', dot: '#10b981' }},
-  {{ key: 'failed',         label: 'Failed',                dot: '#ef4444' }},
+  {{ key: 'queued',    label: 'Queued',                dot: '#94a3b8' }},
+  {{ key: 'running',   label: 'Running',               dot: '#3b82f6' }},
+  {{ key: 'completed', label: 'Committed / Completed', dot: '#10b981' }},
+  {{ key: 'failed',    label: 'Failed',                dot: '#ef4444' }},
 ];
 
 const filters = {{ project: 'all', perspective: 'all', complexity: 'all' }};
@@ -532,46 +599,51 @@ function render() {{
     .map(([s,n]) => `<div class="stat"><span>${{n}}</span> ${{s.replace('_',' ')}}</div>`)
     .join('');
 
+  // ── SWIMLANE LAYOUT ───────────────────────────────────────────────────────
+  // Row per project, column per status. Header row first.
+
+  const projects = [...new Set(ALL_TASKS.map(t => t.project))].sort();
+
+  // Header row: empty corner + status column headers
+  const corner = document.createElement('div');
+  corner.className = 'board-col-header first';
+  corner.textContent = 'Project';
+  board.appendChild(corner);
+
   COLUMNS.forEach(col => {{
-    const colTasks = visible.filter(t => t.status === col.key);
-    if (col.key !== 'queued' && col.key !== 'pending_review' && colTasks.length === 0) return;
+    const hdr = document.createElement('div');
+    hdr.className = 'board-col-header';
+    const colCount = visible.filter(t => t.status === col.key).length;
+    hdr.innerHTML = `<span class="col-dot" style="background:${{col.dot}}"></span>${{col.label}} <span class="count" style="margin-left:4px">${{colCount}}</span>`;
+    board.appendChild(hdr);
+  }});
 
-    const colEl = document.createElement('div');
-    colEl.className = 'column';
+  // One row per project
+  projects.forEach(proj => {{
+    const color = COLORS[proj] || '#555';
 
-    const isCompleted = col.key === 'completed';
-    const bodyId      = `col-${{col.key}}`;
+    // Project label cell
+    const lbl = document.createElement('div');
+    lbl.className = 'project-label';
+    lbl.innerHTML = `<div class="project-label-inner">
+      <span class="project-dot-label" style="background:${{color}}"></span>
+      ${{proj}}
+    </div>`;
+    board.appendChild(lbl);
 
-    // Queued: cap at 5 per project so the column doesn't dominate the board
-    let displayTasks = colTasks;
-    let hiddenCount  = 0;
-    if (col.key === 'queued') {{
-      const byProject = {{}};
-      colTasks.forEach(t => {{
-        if (!byProject[t.project]) byProject[t.project] = [];
-        byProject[t.project].push(t);
-      }});
-      displayTasks = Object.values(byProject).flatMap(tasks => tasks.slice(0, 5));
-      hiddenCount  = colTasks.length - displayTasks.length;
-    }}
+    // One cell per status column
+    COLUMNS.forEach(col => {{
+      const cell = document.createElement('div');
+      cell.className = 'swim-cell';
+      const cellTasks = visible.filter(t => t.project === proj && t.status === col.key);
 
-    const moreFooter = hiddenCount > 0
-      ? `<div style="text-align:center;padding:8px;font-size:12px;color:var(--muted)">+${{hiddenCount}} more (5 shown per project)</div>`
-      : '';
-
-    colEl.innerHTML = `
-      <div class="col-header">
-        <span style="width:8px;height:8px;border-radius:50%;background:${{col.dot}};display:inline-block"></span>
-        ${{col.label}}
-        <span class="count">${{colTasks.length}}</span>
-      </div>
-      ${{isCompleted ? `<div class="completed-toggle" onclick="toggleCompleted()">▸ Show completed</div>` : ''}}
-      <div class="col-body ${{isCompleted ? 'hidden' : ''}}" id="${{bodyId}}">
-        ${{displayTasks.length ? displayTasks.map(card).join('') : '<div class="empty">No tasks</div>'}}
-        ${{moreFooter}}
-      </div>`;
-
-    board.appendChild(colEl);
+      if (cellTasks.length === 0) {{
+        cell.classList.add('empty');
+      }} else {{
+        cell.innerHTML = cellTasks.map(card).join('');
+      }}
+      board.appendChild(cell);
+    }});
   }});
 }}
 

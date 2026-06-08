@@ -1085,6 +1085,9 @@ def run_task(task: dict, spend_tracker, task_queue):
     attempt_logs  = []   # full per-attempt data written to pipeline_logs/{task_id}.json
     context_md    = load_context(project, _cfg("REPO_PATHS"))
 
+    # Mark running in DB so dashboard shows it in the Running column
+    task_queue.mark_running(task)
+
     # Notify Discord that this task is starting
     _notify().task_started(task)
 

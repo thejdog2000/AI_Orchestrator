@@ -64,7 +64,69 @@ def _load_tasks_in_window(start: str, end: str) -> dict:
     return result
 
 
-def _compute_stats(tasks: dict) -> dict:
+def _load_spend_data(start: str, end: str) -> dict:
+    """
+    Pull cost breakdown from spend.json for the retro window.
+    Returns successful cost (DB), wasted cost (timeouts/retries from partial_events),
+    and cached token savings estimate.
+    """
+    try:
+        from config import LOGS_DIR
+        from core.spend import MINIMAX_RATES, DEFAULT_RATE
+        spend_file = LOGS_DIR / "spend.json"
+        if not spend_file.exists():
+            return {}
+        data = json.loads(spend_file.read_text())
+
+        # Wasted spend = partial_events in the window (timeouts, retries)
+        wasted = sum(
+            e.get("est_usd", 0) for e in data.get("partial_events", [])
+            if start[:10] <= (e.get("date") or "") <= end[:10]
+        )
+
+        # Token cost breakdown from DB for completed tasks in window
+        if not DB_PATH.exists():
+            return {"wasted_usd": round(wasted, 5)}
+
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT actual_tokens, cost_usd, model_used
+            FROM tasks WHERE status='completed'
+            AND completed_at >= ? AND completed_at <= ?
+        """, (start, end)).fetchall()
+        conn.close()
+
+        input_tokens  = 0
+        output_tokens = 0
+        successful_cost = 0.0
+        for r in rows:
+            successful_cost += r["cost_usd"] or 0
+            # actual_tokens ≈ output tokens (what's stored); estimate input from cost
+            model = (r["model_used"] or "").lower()
+            in_rate, out_rate = MINIMAX_RATES.get(model, DEFAULT_RATE)
+            out_tok = r["actual_tokens"] or 0
+            output_tokens += out_tok
+            # back-calculate input tokens: cost = in*in_rate/1M + out*out_rate/1M
+            if in_rate > 0:
+                in_tok = max(0, int(((r["cost_usd"] or 0) - out_tok / 1_000_000 * out_rate)
+                                    / in_rate * 1_000_000))
+                input_tokens += in_tok
+
+        return {
+            "successful_usd":  round(successful_cost, 5),
+            "wasted_usd":      round(wasted, 5),
+            "output_tokens":   output_tokens,
+            "input_tokens_est": input_tokens,
+            "efficiency_pct":  round(successful_cost / (successful_cost + wasted) * 100, 1)
+                               if (successful_cost + wasted) > 0 else 100.0,
+        }
+    except Exception as e:
+        log.warning(f"Spend breakdown failed: {e}")
+        return {}
+
+
+def _compute_stats(tasks: dict, start: str = "", end: str = "") -> dict:
     """Aggregate stats across all task groups."""
     all_tasks = tasks["completed"] + tasks["failed"] + tasks["pending_review"]
 
@@ -90,7 +152,7 @@ def _compute_stats(tasks: dict) -> dict:
             "failed":         len(f),
             "pending_review": len(p),
             "cost":           round(sum(t.get("cost_usd") or 0 for t in c), 5),
-            "by_category":    by_category,  # e.g. {"feature": 2, "bugfix": 1}
+            "by_category":    by_category,
         }
 
     # Failure pattern: most common error codes
@@ -111,18 +173,21 @@ def _compute_stats(tasks: dict) -> dict:
         else:
             persp_stats[p]["failed"] += 1
 
+    spend = _load_spend_data(start, end) if start else {}
+
     return {
-        "completed":      len(tasks["completed"]),
-        "failed":         len(tasks["failed"]),
-        "pending_review": len(tasks["pending_review"]),
-        "total":          len(all_tasks),
-        "total_cost_usd": round(total_cost, 5),
-        "total_tokens":   total_tokens,
-        "quality_avg":    quality_avg,
-        "projects":       projects,
-        "by_project":     by_project,
-        "top_errors":     top_errors[:5],
-        "perspectives":   persp_stats,
+        "completed":        len(tasks["completed"]),
+        "failed":           len(tasks["failed"]),
+        "pending_review":   len(tasks["pending_review"]),
+        "total":            len(all_tasks),
+        "total_cost_usd":   round(total_cost, 5),
+        "total_tokens":     total_tokens,
+        "quality_avg":      quality_avg,
+        "projects":         projects,
+        "by_project":       by_project,
+        "top_errors":       top_errors[:5],
+        "perspectives":     persp_stats,
+        "spend_breakdown":  spend,   # successful vs wasted, token details
     }
 
 
@@ -197,9 +262,15 @@ Daily retrospective for {date}. Write your analysis now.
 
 24H STATS:
 - Completed: {stats['completed']} | Failed: {stats['failed']} | Pending review: {stats['pending_review']}
-- Total cost: ${stats['total_cost_usd']:.4f} | Quality avg: {stats['quality_avg'] or 'n/a'}/10
+- Quality avg: {stats['quality_avg'] or 'n/a'}/10
 - Active projects: {', '.join(stats['projects']) or 'none'}
 - Top errors: {errors}
+
+COST BREAKDOWN:
+- Successful tasks: ${stats['spend_breakdown'].get('successful_usd', stats['total_cost_usd']):.4f}
+- Wasted (timeouts/retries): ${stats['spend_breakdown'].get('wasted_usd', 0):.4f}
+- Efficiency: {stats['spend_breakdown'].get('efficiency_pct', 100)}% of spend produced committed output
+- Output tokens: {stats['spend_breakdown'].get('output_tokens', stats['total_tokens']):,} | Input tokens (est): {stats['spend_breakdown'].get('input_tokens_est', 0):,}
 
 SPRINT FEATURES LANDED (last 7 days, by effort category):
 {sprint_block}
@@ -228,10 +299,10 @@ def _generate_narrative(stats: dict, tasks: dict, date: str, sprint_features: di
     """Call Ollama to write the retrospective narrative. Falls back to empty strings."""
     _KEYS = ("summary", "wins", "failures", "patterns", "recommendations", "sprint_health")
     try:
-        import executor
         from config import CFG
-        if not executor._config:
-            executor.configure(CFG)
+        import core.executor as _executor
+        if not _executor._config:
+            _executor.configure(CFG)
         from core.executor import ollama_generate
         raw = ollama_generate(
             _build_narrative_prompt(stats, tasks, date, sprint_features),
@@ -302,7 +373,7 @@ def generate_retrospective(hours: int = 24) -> dict:
     log.info(f"Generating retrospective for {date} ({hours}h window)")
 
     tasks           = _load_tasks_in_window(start, end)
-    stats           = _compute_stats(tasks)
+    stats           = _compute_stats(tasks, start=start, end=end)
     sprint_features = _compute_sprint_features(days=7)
     narrative       = _generate_narrative(stats, tasks, date, sprint_features)
 

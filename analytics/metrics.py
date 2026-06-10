@@ -169,12 +169,36 @@ class MetricsTracker:
 
 # ── DISCORD POSTING ───────────────────────────────────────────────────────────
 
-def post_metrics_snapshot(days: int = 30) -> bool:
+_LAST_POSTED_FILE = LOGS_DIR / "metrics_last_posted.txt"
+
+
+def _seconds_since_last_post() -> float:
+    """Return seconds since last successful metrics post, or infinity if never."""
+    try:
+        ts = datetime.fromisoformat(_LAST_POSTED_FILE.read_text().strip())
+        return (datetime.now() - ts).total_seconds()
+    except Exception:
+        return float("inf")
+
+
+def post_metrics_snapshot(days: int = 30, min_interval_hours: float = None) -> bool:
     """
     Compute metrics and post to #orchestrator-metrics.
-    Called by scheduler in orchestrator_main.py every 10 hours.
+    Called by scheduler in orchestrator_main.py every N hours.
+
+    min_interval_hours: if set, skip posting if a successful post occurred more
+    recently than this many hours ago (guards against restart-loop double-posts).
+    Defaults to METRICS_INTERVAL_HOURS from config.
     Returns True if Discord post succeeded.
     """
+    if min_interval_hours is None:
+        from config import METRICS_INTERVAL_HOURS
+        min_interval_hours = METRICS_INTERVAL_HOURS
+
+    if _seconds_since_last_post() < min_interval_hours * 3600:
+        log.info("Metrics snapshot skipped — posted less than %sh ago", min_interval_hours)
+        return False
+
     try:
         tracker = MetricsTracker(days=days)
         data    = tracker.compute()
@@ -182,6 +206,8 @@ def post_metrics_snapshot(days: int = 30) -> bool:
         ok      = notify.post("metrics", msg)
         if ok:
             log.info("Metrics snapshot posted to #orchestrator-metrics")
+            LOGS_DIR.mkdir(parents=True, exist_ok=True)
+            _LAST_POSTED_FILE.write_text(datetime.now().isoformat())
         else:
             log.warning("Metrics post failed — Discord not configured?")
         return ok

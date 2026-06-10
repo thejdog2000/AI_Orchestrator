@@ -34,7 +34,6 @@ from config      import (CFG, BASE_DIR, TASKS_DIR, PENDING_DIR, APPROVED_DIR,
                           DASHBOARD_PORT, METRICS_INTERVAL_HOURS)
 from core.spend       import SpendTracker
 from core.task_queue  import TaskQueue
-from dashboard.generator     import generate as generate_dashboard
 from core.task_generator     import generate_tasks_all_projects
 from pipeline.lang_pipeline  import run_nightly as run_lang_nightly
 from analytics.retro_generator import generate_retrospective
@@ -132,6 +131,13 @@ def execute_next_task():
                     continue
                 if not _project_running.get(proj):
                     gaps = task_queue.get_gap_fill_tasks()
+                    if not gaps:
+                        # No gap-fill tasks in DB — seed from hardcoded fallbacks and retry
+                        from core.task_generator import get_gap_fill_tasks as _hardcoded_gaps
+                        for g in _hardcoded_gaps():
+                            if g["project"] in ENABLED_PROJECTS:
+                                task_queue.add_task(g)
+                        gaps = task_queue.get_gap_fill_tasks()
                     if gaps:
                         task    = gaps[0]
                         project = proj
@@ -139,6 +145,8 @@ def execute_next_task():
                         break
 
     if task is None:
+        # Queue is empty — good time to refill via council
+        _maybe_refill_queue()
         return
 
     log.info(f"[{project}] → {task['id']}: {task['description'][:80]}")
@@ -148,6 +156,19 @@ def execute_next_task():
     finally:
         with _project_lock:
             _project_running[project] = False
+        _maybe_refill_queue()
+
+
+def _maybe_refill_queue():
+    """Fire council task generation if any enabled project is running low."""
+    if task_queue.total_unblocked(projects=ENABLED_PROJECTS) < CFG["QUEUE_REFILL_THRESHOLD"]:
+        generate_tasks_all_projects(
+            task_queue       = task_queue,
+            enabled_projects = ENABLED_PROJECTS,
+            sprint_phases    = CFG["SPRINT_PHASES"],
+            sprint_goals     = CFG["SPRINT_GOALS"],
+            threshold        = CFG["QUEUE_REFILL_THRESHOLD"],
+        )
 
 # ── BACKUP ────────────────────────────────────────────────────────────────────
 
@@ -235,10 +256,9 @@ scheduler.add_job(
 scheduler.add_job(backup_db, "cron", hour=3, minute=0, id="db_backup")
 
 def _run_retrospective():
-    """Generate daily retro at midnight, then refresh the dashboard."""
+    """Generate daily retro at 10pm."""
     try:
         generate_retrospective(hours=24)
-        generate_dashboard()
         log.info("Daily retrospective generated")
     except Exception as e:
         log.error(f"Retrospective generation failed: {e}")
@@ -267,6 +287,7 @@ scheduler.add_job(
     id="metrics_snapshot",
     max_instances=1,
     coalesce=True,
+    next_run_time=datetime.now(),  # fire immediately on startup, then every N hours
 )
 
 # ── ENTRY POINT ───────────────────────────────────────────────────────────────
@@ -290,13 +311,27 @@ if __name__ == "__main__":
     # Notify Discord that the orchestrator is online
     notify.orchestrator_started(ENABLED_PROJECTS, spend_tracker.monthly_spend(), MINIMAX_SPEND_CAP)
 
+    # Startup retro catch-up: generate if last retro is >24h old.
+    # Handles the case where the orchestrator was offline during last night's 10pm cron
+    # (e.g., stopped at 8pm, restarted the next day at any time).
+    try:
+        from analytics.retro_generator import load_all_retros as _load_retros
+        _retros = _load_retros(max_days=1)
+        if _retros:
+            _retro_age = (datetime.now() - datetime.fromisoformat(_retros[0]["generated_at"])).total_seconds()
+            if _retro_age > 86400:
+                log.info(f"Stale retro at startup ({_retro_age/3600:.1f}h old) — generating catch-up")
+                generate_retrospective()
+        # No retros yet → first run, tonight's cron will handle it
+    except Exception as e:
+        log.warning(f"Startup retro catch-up failed: {e}")
+
     if task_queue.total_unblocked(projects=ENABLED_PROJECTS) == 0:
         _seed_sample_tasks()
 
     _stats = task_queue.stats()
     _stats.pop("total_cost_usd", None)   # misleading — use SpendTracker for cost
     log.info(f"Queue: {_stats} | Monthly spend: ${spend_tracker.monthly_spend():.2f}")
-    generate_dashboard()
 
     try:
         scheduler.start()

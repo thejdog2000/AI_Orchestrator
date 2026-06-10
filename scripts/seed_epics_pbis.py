@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from task_queue import TaskQueue
+from core.task_queue import TaskQueue
 from config import DB_PATH
 
 tq = TaskQueue(DB_PATH)
@@ -229,16 +229,28 @@ tasks = [
         "priority":       2,
     },
     {
-        "id":             "lang_015",
+        "id":             "lang_015a",
         "project":        "lang",
         "pbi_id":         "pbi_lang_passport_stamp",
-        "description":    "Wire arc completion into main.js and scene_manager.js: after each scene completion check allScenesAtPracticed(); if true fire renderPassportStamp. Mount showArcRibbon on scene menu with live % and next-stop label.",
+        "description":    "Wire arc completion into main.js only: after each scene completion call allScenesAtPracticed(); if true call renderPassportStamp(phrasesEarned). Import both from their respective modules.",
         "complexity":     "medium",
         "effort_category":"feature",
         "perspective":    "game_designer",
-        "rationale":      "Final integration — depends on persistence and UI components.",
+        "rationale":      "Integration split pt.1 — main.js only to keep output size manageable.",
         "depends_on":     ["lang_014"],
         "priority":       3,
+    },
+    {
+        "id":             "lang_015b",
+        "project":        "lang",
+        "pbi_id":         "pbi_lang_passport_stamp",
+        "description":    "Wire arc ribbon into scene_manager.js only: mount showArcRibbon(pct, nextStop) on scene menu render, reading arc progress from persistence. Import from src/3d/rewardUi.js.",
+        "complexity":     "medium",
+        "effort_category":"feature",
+        "perspective":    "game_designer",
+        "rationale":      "Integration split pt.2 — scene_manager.js only, depends on lang_015a wiring arc state.",
+        "depends_on":     ["lang_015a"],
+        "priority":       4,
     },
 
     # ── pbi_lang_stt_abstraction (replaces lang_007) ──

@@ -43,82 +43,127 @@ STATE_FILE = TASKS_DIR / "lang_schedule.json"
 
 SCENE_SCHEDULE = [
     # Night 1
-    {"id": "ja_izakaya_01",     "night": 1, "lang": "ja", "level": "a0",
-     "location": "izakaya",          "output": "scenes/ja/izakaya_01.js"},
+    # ja_izakaya_01 skipped — migrated manually to src/scenes/ja/izakaya-morning/
     {"id": "ja_konbini_01",     "night": 1, "lang": "ja", "level": "a0",
-     "location": "konbini",          "output": "scenes/ja/konbini_01.js"},
+     "location": "konbini",          "output_dir": "src/scenes/ja/konbini-morning"},
     # Night 2
     {"id": "ja_train_01",       "night": 2, "lang": "ja", "level": "a1",
-     "location": "train station",    "output": "scenes/ja/train_station_01.js"},
+     "location": "train station",    "output_dir": "src/scenes/ja/train-station"},
     {"id": "ja_ramen_01",       "night": 2, "lang": "ja", "level": "a1",
-     "location": "ramen shop",       "output": "scenes/ja/ramen_shop_01.js"},
+     "location": "ramen shop",       "output_dir": "src/scenes/ja/ramen-shop"},
     # Night 3
     {"id": "ja_temple_01",      "night": 3, "lang": "ja", "level": "a1",
-     "location": "temple/directions","output": "scenes/ja/temple_01.js"},
-    {"id": "ja_review_pass",    "night": 3, "lang": "ja", "level": "a1",
-     "location": "randomization_expand", "output": None},  # no new scene, expand existing pools
+     "location": "temple/directions","output_dir": "src/scenes/ja/temple-visit"},
     # Night 4
-    {"id": "es_taco_01",        "night": 4, "lang": "es", "level": "a0",
-     "location": "taco vendor",      "output": "scenes/es/taco_vendor_01.js"},
+    # es_taco_01 skipped — migrated manually to src/scenes/es/taco-vendor/
     {"id": "es_mercado_01",     "night": 4, "lang": "es", "level": "a0",
-     "location": "mercado",          "output": "scenes/es/mercado_01.js"},
+     "location": "mercado",          "output_dir": "src/scenes/es/mercado"},
     # Night 5
-    {"id": "es_cafe_01",        "night": 5, "lang": "es", "level": "a1",
-     "location": "café",             "output": "scenes/es/cafe_01.js"},
+    # es_cafe_01 skipped — migrated manually to src/scenes/es/cafe-morning/
     {"id": "es_taxi_01",        "night": 5, "lang": "es", "level": "a1",
-     "location": "taxi",             "output": "scenes/es/taxi_01.js"},
+     "location": "taxi",             "output_dir": "src/scenes/es/taxi"},
     # Night 6
     {"id": "es_hotel_01",       "night": 6, "lang": "es", "level": "a1",
-     "location": "hotel check-in",   "output": "scenes/es/hotel_01.js"},
-    {"id": "es_srs_integration","night": 6, "lang": "es", "level": "a1",
-     "location": "srs_integration",  "output": None},  # SRS system wiring
+     "location": "hotel check-in",   "output_dir": "src/scenes/es/hotel-checkin"},
     # Night 7 — buffer: retry failures, expand randomization
 ]
 
-# ── SCENE JS SCHEMA TEMPLATE ─────────────────────────────────────────────────
-# Included in every generation prompt so MiniMax knows exactly what to output.
+# ── SCENE FILE SCHEMAS ───────────────────────────────────────────────────────
+# Each scene lives in src/scenes/{lang}/{slug}/ with 4 files.
+# These schemas are injected into generation prompts.
 
-SCENE_SCHEMA = """
-export const scene = {
-  id: 'scene_id',
-  language: 'ja' | 'es',
-  level: 'a0' | 'a1',
-  location: 'human readable location name',
-  three: {
-    cameraPosition: { x, y, z },
-    ambientLight: { color: 0xHEX, intensity: float },
-    pointLights: [{ position, color, intensity }],
-    assets: [{
-      id: 'asset_id',
-      sketchfabQuery: 'search string for asset sourcing',
-      position: { x, y, z },
-      scale: float
-    }]
+ENV_SCHEMA = """
+// env.js — Three.js environment only. No dialogue content.
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.module.js';
+
+export const CAMERA = {
+  ambient:      { pos: new THREE.Vector3(x, y, z), lookAt: new THREE.Vector3(x, y, z) },
+  conversation: { pos: new THREE.Vector3(x, y, z), lookAt: new THREE.Vector3(x, y, z) },
+};
+
+export const NPC_ANCHOR = { name: string, position: [x, y, z], lookAt: [x, y, z] };
+
+// ENV: Three.js scene factory. Returns { startCinematic, dispose }.
+// Rules: Three.js r128 only. No CapsuleGeometry (use CylinderGeometry+SphereGeometry).
+// Must include: floor, back wall, counter, NPC body+head, 2-4 scene-specific props,
+// at least one practical point light, NPC head-bob in animate loop,
+// camera lerp from ambient → conversation on startCinematic(),
+// resize handler, dispose() that cancels animId + removes resize listener.
+export const ENV = { camera: CAMERA, npcAnchor: NPC_ANCHOR, createScene };
+export function createScene({ canvas, getAppState, onConversationReady }) { ... }
+"""
+
+DIALOGUE_SCHEMA = """
+// dialogue.js — NPC data, all conversation content, randomization pools.
+export const DIALOGUE = {
+  npc: { name: string, role: string, personality: string },
+  opening: { [lang]: string, en: string },
+  vocabularyFocus: string[],  // 5-8 target words for this level
+  grammarFocus: string,       // one grammar point (e.g. "て-form requests")
+  randomizationPool: {
+    playerGreetings:    string[],  // ≥5 variants
+    orderOptions:       string[],  // ≥5 variants
+    correctResponses:   string[],  // ≥5 variants
+    incorrectAttempts:  string[],  // ≥5 variants
   },
-  npc: { name: string, role: string },
-  dialogue: {
-    opening: { ja/es: string, en: string },
-    vocabularyFocus: string[],   // 5-8 target words
-    grammarFocus: string,        // one grammar point
-    randomizationPool: {
-      playerGreetings: string[], // minimum 5 variants
-      orderOptions: string[],
-      correctResponses: string[],
-      incorrectAttempts: string[]
-    },
-    branches: [{
-      trigger: string,
-      npcResponse: { ja/es: string, en: string },
-      playerOptions: string[]
-    }],
-    successEnding: { ja/es: string, en: string },
-    failureRecovery: { ja/es: string, en: string }
-  },
-  srs: {
-    newCards: string[],
-    reviewTrigger: 'scene_complete'
-  }
-}
+  branches: [{
+    trigger: string,
+    npcResponse: { [lang]: string, en: string },
+    playerOptions: string[],
+  }],
+  successEnding:   { [lang]: string, en: string },
+  failureRecovery: { [lang]: string, en: string },
+};
+"""
+
+BEATS_SCHEMA = """
+// beats.js — optional beats, skill-level variants, SRS cards.
+export const BEATS = {
+  optional: [{           // unlocked on repeat visits
+    id: string,
+    trigger: string,
+    npcLine: { [lang]: string, en: string },
+    playerOptions: string[],
+    unlockTier: 'practiced' | 'confident' | 'mastered',
+  }],
+  a0Variants: [{         // simpler NPC lines + full scaffolding for A0 players
+    beatRef: string,
+    npcLine: { [lang]: string, en: string },
+    scaffold: string,
+  }],
+  a1Variants: [{         // natural-speed NPC lines + reduced scaffolding for A1 players
+    beatRef: string,
+    npcLine: { [lang]: string, en: string },
+    scaffold: string,
+  }],
+  srsCards: [{           // flashcards earned from this scene (min 8)
+    front: string,       // target language
+    back: string,        // English meaning
+    hint: string,        // usage note or example sentence
+  }],
+};
+"""
+
+INDEX_TEMPLATE = """\
+// index.js — auto-generated barrel. Do not edit by hand.
+import {{ createScene, CAMERA, NPC_ANCHOR }} from './env.js';
+import {{ DIALOGUE }} from './dialogue.js';
+import {{ BEATS }} from './beats.js';
+
+const SCENE = {{
+  id:        '{scene_id}',
+  language:  '{lang}',
+  level:     '{level}',
+  location:  '{location}',
+  camera:    CAMERA,
+  npcAnchor: NPC_ANCHOR,
+  createScene,
+  npc:       DIALOGUE.npc,
+  dialogue:  DIALOGUE,
+  beats:     BEATS,
+}};
+
+export default SCENE;
 """
 
 # ── SCHEDULE STATE ────────────────────────────────────────────────────────────
@@ -207,30 +252,39 @@ def _due_tonight(state: dict, night_number: int) -> list[dict]:
 # ── MINIMAX + OLLAMA ──────────────────────────────────────────────────────────
 
 def _ollama_prompt(scene: dict) -> str:
-    lang_name = "Japanese" if scene["lang"] == "ja" else "Spanish"
+    lang_name  = "Japanese" if scene["lang"] == "ja" else "Spanish"
     level_name = "absolute beginner (A0)" if scene["level"] == "a0" else "beginner (A1)"
+    out_dir    = scene.get("output_dir", f"src/scenes/{scene['lang']}/unknown")
     prompt = (
-        f"Write a system prompt for generating a language learning scene.\n"
+        f"Write a system prompt for generating a language learning scene split across 3 files.\n"
         f"Language: {lang_name} ({level_name})\n"
         f"Location: {scene['location']}\n"
-        f"The output must be a complete ES module following the schema below.\n"
+        f"Output directory: {out_dir}/\n"
+        f"The output must be 3 files: env.js, dialogue.js, beats.js.\n"
+        f"Each file must follow its schema exactly.\n"
         f"Randomization pools must have at least 5 variants each.\n"
-        f"Vocabulary: 5-8 target words appropriate for the level.\n\n"
-        f"Schema:\n{SCENE_SCHEMA}\n\n"
+        f"Vocabulary: 5-8 target words appropriate for the level.\n"
+        f"SRS cards: minimum 8.\n\n"
+        f"env.js schema:\n{ENV_SCHEMA}\n\n"
+        f"dialogue.js schema:\n{DIALOGUE_SCHEMA}\n\n"
+        f"beats.js schema:\n{BEATS_SCHEMA}\n\n"
         f"Write a concise system prompt (no preamble):"
     )
     try:
         resp = requests.post(
             f"{OLLAMA_BASE}/api/generate",
             json={"model": OLLAMA_MODEL_CODE, "prompt": prompt, "stream": False,
-                  "options": {"num_ctx": 8192, "num_predict": 500}},
+                  "options": {"num_ctx": 8192, "num_predict": 600}},
             timeout=120,
         )
         resp.raise_for_status()
         return resp.json().get("response", "").strip()
     except Exception as e:
         log.error(f"Ollama prompt generation failed: {e}")
-        return f"Generate a {scene['lang'].upper()} language learning scene for a {scene['location']}."
+        return (
+            f"Generate a {lang_name} {level_name} language learning scene "
+            f"for: {scene['location']}. Output 3 files: env.js, dialogue.js, beats.js."
+        )
 
 
 def _minimax_generate(system: str, user: str) -> tuple:
@@ -284,84 +338,97 @@ def _run_smoke_test(scene_path: Path) -> tuple[bool, str]:
 
 # ── SCENE GENERATION ─────────────────────────────────────────────────────────
 
+def _write_file_blocks(content: str, repo_path: Path) -> list[str]:
+    """
+    Parse <<<FILE: path>>> ... <<<END>>> blocks from LLM output and write each to disk.
+    Returns list of relative paths written. Blocks outside the repo are rejected.
+    """
+    import re
+    blocks  = re.findall(r"<<<FILE:\s*(.+?)>>>\s*\n(.*?)<<<END>>>", content, re.DOTALL)
+    written = []
+    for rel_path, file_content in blocks:
+        rel  = rel_path.strip()
+        dest = (repo_path / rel).resolve()
+        if not dest.is_relative_to(repo_path.resolve()):
+            log.error(f"[lang] BLOCKED path traversal attempt: {rel}")
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(file_content.rstrip() + "\n")
+        log.info(f"[lang] Wrote {rel} ({len(file_content)} chars)")
+        written.append(rel)
+    return written
+
+
 def _generate_scene(scene: dict) -> dict:
     """
-    Generate one scene. Returns result dict with success, tokens, smoke_passed.
+    Generate one scene as 3 files (env.js, dialogue.js, beats.js) + auto-written index.js.
+    Returns result dict with success, tokens, smoke_passed, files_written.
     """
-    scene_id  = scene["id"]
-    out_path  = scene.get("output")
+    scene_id = scene["id"]
+    out_dir  = scene.get("output_dir")
 
-    if not out_path:
-        # Special tasks (randomization expand, SRS integration) — simplified prompt
-        log.info(f"[lang] Special task: {scene_id}")
-        system = _ollama_prompt(scene)
-        user   = (
-            f"Task: {scene_id.replace('_', ' ')}\n"
-            f"Expand randomization pools for all completed scenes or wire SRS integration.\n"
-            f"Output modified files in <<<FILE: path>>> ... <<<END>>> format."
-        )
-        try:
-            content, in_tok, out_tok = _minimax_generate(system, user)
-            # Parse and write any file blocks
-            import re
-            blocks = re.findall(r"<<<FILE:\s*(.+?)>>>\s*\n(.*?)<<<END>>>", content, re.DOTALL)
-            for rel_path, file_content in blocks:
-                rel = rel_path.strip()
-                dest = (REPO_PATH / rel).resolve()
-                if not dest.is_relative_to(REPO_PATH.resolve()):
-                    log.error(f"[lang] BLOCKED path traversal: {rel}")
-                    continue
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_text(file_content)
-                log.info(f"[lang] Wrote {rel}")
-            return {"success": True, "smoke_passed": True,
-                    "input_tokens": in_tok, "output_tokens": out_tok}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+    if not out_dir:
+        log.warning(f"[lang] {scene_id}: no output_dir — skipping")
+        return {"success": True, "smoke_passed": True, "input_tokens": 0, "output_tokens": 0}
 
-    # Standard scene generation
-    dest = REPO_PATH / out_path
-    dest.parent.mkdir(parents=True, exist_ok=True)
-
-    lang_name = "Japanese" if scene["lang"] == "ja" else "Spanish"
+    lang_name  = "Japanese" if scene["lang"] == "ja" else "Spanish"
     level_name = "absolute beginner (A0)" if scene["level"] == "a0" else "beginner (A1)"
 
     system = _ollama_prompt(scene)
     user   = (
-        f"Generate a complete {lang_name} language learning scene for: {scene['location']}\n"
-        f"Level: {level_name}\n\n"
-        f"Output ONLY the complete ES module as a single code block.\n"
-        f"The module must follow the schema exactly.\n"
-        f"Randomization pools: minimum 5 variants each.\n"
-        f"Vocabulary focus: 5-8 words appropriate for {level_name}.\n\n"
-        f"Output the complete ES module (start with 'export const scene = {{'):"
+        f"Generate a complete {lang_name} {level_name} language learning scene.\n"
+        f"Location: {scene['location']}\n"
+        f"Output directory: {out_dir}/\n\n"
+        f"Output exactly 3 files using this format for each:\n"
+        f"<<<FILE: {out_dir}/env.js>>>\n"
+        f"[full env.js content]\n"
+        f"<<<END>>>\n"
+        f"<<<FILE: {out_dir}/dialogue.js>>>\n"
+        f"[full dialogue.js content]\n"
+        f"<<<END>>>\n"
+        f"<<<FILE: {out_dir}/beats.js>>>\n"
+        f"[full beats.js content]\n"
+        f"<<<END>>>\n\n"
+        f"Requirements:\n"
+        f"- env.js: Three.js r128 only, no CapsuleGeometry, NPC head-bob, camera lerp, dispose()\n"
+        f"- dialogue.js: randomizationPool minimum 5 variants per key, "
+        f"  vocabularyFocus 5-8 words, one grammarFocus point\n"
+        f"- beats.js: minimum 8 SRS cards, A0 and A1 variants for core beats, "
+        f"  at least 2 optional beats\n"
+        f"Cultural specificity: setting must be authentic to {scene['location']}."
     )
 
     try:
         content, in_tok, out_tok = _minimax_generate(system, user)
     except Exception as e:
-        return {"success": False, "error": str(e),
-                "input_tokens": 0, "output_tokens": 0}
+        return {"success": False, "error": str(e), "input_tokens": 0, "output_tokens": 0}
 
-    # Extract JS from response (may or may not have code fences)
-    js_content = content.strip()
-    if "```" in js_content:
-        lines = js_content.split("\n")
-        start = next((i for i, l in enumerate(lines) if l.strip().startswith("```")), 0)
-        end   = next((i for i, l in enumerate(lines[start+1:], start+1)
-                      if l.strip() == "```"), len(lines))
-        js_content = "\n".join(lines[start+1:end])
+    # Write the 3 generated files
+    written = _write_file_blocks(content, REPO_PATH)
 
-    if "export const scene" not in js_content:
-        log.warning(f"[lang] {scene_id}: response missing 'export const scene'")
-        return {"success": False, "error": "missing_export_const_scene",
+    # Validate expected files are present
+    expected = [f"{out_dir}/env.js", f"{out_dir}/dialogue.js", f"{out_dir}/beats.js"]
+    missing  = [f for f in expected if f not in written]
+    if missing:
+        log.warning(f"[lang] {scene_id}: missing files in response: {missing}")
+        return {"success": False, "error": f"missing_files:{','.join(missing)}",
                 "input_tokens": in_tok, "output_tokens": out_tok}
 
-    dest.write_text(js_content)
-    log.info(f"[lang] Wrote {out_path} ({len(js_content)} chars)")
+    # Auto-generate index.js barrel (no LLM needed — always the same shape)
+    scene_slug = out_dir.split("/")[-1]          # e.g. "konbini-morning"
+    index_content = INDEX_TEMPLATE.format(
+        scene_id = f"{scene['lang']}/{scene_slug}",
+        lang     = scene["lang"],
+        level    = scene["level"],
+        location = scene["location"],
+    )
+    index_path = REPO_PATH / out_dir / "index.js"
+    index_path.write_text(index_content)
+    written.append(f"{out_dir}/index.js")
+    log.info(f"[lang] Wrote {out_dir}/index.js (auto-generated barrel)")
 
-    # Smoke test
-    smoke_passed, smoke_output = _run_smoke_test(dest)
+    # Smoke test against index.js
+    smoke_passed, smoke_output = _run_smoke_test(index_path)
     if not smoke_passed:
         log.warning(f"[lang] Smoke test FAILED for {scene_id}:\n{smoke_output}")
     else:
@@ -371,6 +438,7 @@ def _generate_scene(scene: dict) -> dict:
         "success":       True,
         "smoke_passed":  smoke_passed,
         "smoke_output":  smoke_output,
+        "files_written": written,
         "input_tokens":  in_tok,
         "output_tokens": out_tok,
     }
@@ -465,7 +533,8 @@ def show_status():
             icon   = {"pass": "✓", "fail": "✗", "pending": "○"}.get(status, "○")
             att    = st.get("attempts", 0)
             err    = f" [{st.get('error','')}]" if status == "fail" else ""
-            print(f"    {icon} {s['id']:<28} {status:<8} attempts={att}{err}")
+            dest = s.get("output_dir", "—")
+            print(f"    {icon} {s['id']:<28} {status:<8} attempts={att}  → {dest}{err}")
     print()
 
 

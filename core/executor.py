@@ -117,14 +117,14 @@ def ollama_generate(
 def write_execution_prompt(task: dict, context_md: str) -> str:
     """Ollama writes a focused MiniMax system prompt from task + CONTEXT.md."""
     prompt = (
-        f"Write a precise system prompt for an AI code generator.\n"
-        f"Specify which files to create or modify. Be concrete. No preamble.\n\n"
+        f"Write a concise system prompt for an AI code generator. "
+        f"Max 150 words. Name the exact files to modify. No preamble, no explanation.\n\n"
         f"TASK: {task['description']}\n"
         f"PROJECT: {task['project']}\n"
         f"CONTEXT:\n{context_md[:2000]}\n\n"
-        f"System prompt:"
+        f"System prompt (150 words max):"
     )
-    result = ollama_generate(prompt, max_tokens=600, temperature=0.3)
+    result = ollama_generate(prompt, max_tokens=300, temperature=0.3)
     return result.strip() if result else task["description"]
 
 
@@ -519,19 +519,28 @@ class _MiniMaxTimeout(Exception):
         self.estimated_input_tokens = estimated_input_tokens
 
 
+# Max output tokens and wall-clock timeout per complexity level.
+# MiniMax-M3 is a reasoning model — think blocks alone can be 30k+ tokens on
+# complex tasks. Caps prevent low/medium tasks from burning 15+ minutes of API
+# time when the model over-reasons. Timeout is set to 120s per 10k max_tokens
+# as a rough heuristic (observed ~8k tokens/min generation rate).
+_COMPLEXITY_MAX_TOKENS = {"low": 16384, "medium": 32768, "high": 65536}
+_COMPLEXITY_TIMEOUT    = {"low": 600,   "medium": 900,   "high": 1500}
+
+
 def _minimax_chat(
-    system:     str,
-    user:       str,
-    max_tokens: int   = 65536,
+    system:      str,
+    user:        str,
+    max_tokens:  int   = 32768,
     temperature: float = 0.2,
+    timeout:     int   = 600,
 ) -> tuple:
     """
     Direct MiniMax chat/completions. Key from env only — never CLI args.
     Returns (content, input_tokens, output_tokens, cached_tokens).
     temperature=0.2 default — deterministic code output.
-    max_tokens=65536: MiniMax-M3 reasons inside <think>...</think> before writing.
-    On complex multi-file tasks, reasoning alone can be 8k-15k tokens. We want
-    the model to reason fully and still have room for complete file output.
+    Callers should pass max_tokens/timeout from _COMPLEXITY_MAX_TOKENS/TIMEOUT
+    so low/medium tasks don't over-reason and hit wall-clock limits.
     """
     api_key = os.environ.get("MINIMAX_API_KEY", "")
     if not api_key:
@@ -554,7 +563,7 @@ def _minimax_chat(
                 "temperature": temperature,
                 "max_tokens":  max_tokens,
             },
-            timeout=900,
+            timeout=timeout,
         )
     except requests.exceptions.Timeout:
         raise _MiniMaxTimeout(estimated_input_tokens)
@@ -769,12 +778,18 @@ def run_minimax_task(task: dict, system_prompt: str = None) -> dict:
         f"<<<FILE: relative/path/to/file.ext>>>\n"
         f"<complete file content>\n"
         f"<<<END>>>\n\n"
-        f"One block per file. ONLY files you actually modified — do NOT re-output context files unchanged or with truncated content. No prose outside the blocks."
+        f"One block per file. ONLY files you actually modified — do NOT re-output context files unchanged or with truncated content. "
+        f"No prose outside the blocks. No preamble, no explanation, no summary — file blocks only."
     )
 
-    log.info(f"[{project}] Executing {task['id']} via MiniMax")
+    complexity  = task.get("complexity", "medium")
+    max_tokens  = _COMPLEXITY_MAX_TOKENS.get(complexity, 32768)
+    api_timeout = _COMPLEXITY_TIMEOUT.get(complexity, 900)
+    log.info(f"[{project}] Executing {task['id']} via MiniMax (complexity={complexity}, max_tokens={max_tokens}, timeout={api_timeout}s)")
     try:
-        content, input_tokens, output_tokens, cached_tokens = _minimax_chat(system, user_msg)
+        content, input_tokens, output_tokens, cached_tokens = _minimax_chat(
+            system, user_msg, max_tokens=max_tokens, timeout=api_timeout
+        )
     except EnvironmentError as e:
         return {"success": False, "error": str(e), "ollama_prompt": task_prompt,
                 "injected_files": relevant}
@@ -1083,13 +1098,17 @@ def run_task(task: dict, spend_tracker, task_queue):
 
     result        = None
     evaluation    = {}
-    system_prompt = ""
     attempts_made = 0
     attempt_logs  = []   # full per-attempt data written to pipeline_logs/{task_id}.json
     context_md    = load_context(project, _cfg("REPO_PATHS"))
 
+    # Generate the initial prompt before marking running so the dashboard
+    # can show it immediately in the Running column.
+    system_prompt = write_execution_prompt(task, context_md)
+
     # Mark running in DB so dashboard shows it in the Running column
     task_queue.mark_running(task)
+    task_queue.update_status(task["id"], "running", system_prompt=system_prompt[:2000])
 
     # Notify Discord that this task is starting
     _notify().task_started(task)
@@ -1101,9 +1120,9 @@ def run_task(task: dict, spend_tracker, task_queue):
         if repo_path and repo_path.exists():
             subprocess.run(["git", "checkout", "--", "."], cwd=repo_path, capture_output=True)
 
-        # First attempt: fresh prompt. Subsequent: revised prompt targeting failure reasons.
+        # First attempt: use the pre-generated prompt. Subsequent: revise based on failure reasons.
         if attempt == 0:
-            system_prompt = write_execution_prompt(task, context_md)
+            pass  # system_prompt already set above
         else:
             log.info(f"[{project}] Attempt {attempt + 1}: revising prompt based on failure")
             system_prompt = revise_execution_prompt(task, context_md, evaluation)
@@ -1139,9 +1158,9 @@ def run_task(task: dict, spend_tracker, task_queue):
 
         error = result.get("error", "")
 
-        # Don't retry timeouts — the prompt is fine, the API is just slow.
+        # Timeout means the task ran too long — don't retry, flag for splitting.
         if "timed out" in error:
-            log.warning(f"[{project}] Timeout on attempt {attempt + 1} — skipping retries to save tokens")
+            log.warning(f"[{project}] Timeout on attempt {attempt + 1} — task may need splitting")
             break
 
         # Don't retry questions — retrying with the same context won't answer them.
@@ -1340,18 +1359,6 @@ def run_task(task: dict, spend_tracker, task_queue):
             except Exception as _e:
                 log.warning(f"[{project}] PBI post-commit hooks failed ({_e}) — non-fatal")
 
-    # Refill task queue if running low
-    if task_queue.total_unblocked(projects=enabled_projects) < refill_threshold:
-        from core.task_generator import generate_tasks_all_projects       # lazy: circular dep
-        from dashboard.generator import generate as generate_dashboard  # lazy: convenience
-        generate_tasks_all_projects(
-            task_queue       = task_queue,
-            enabled_projects = enabled_projects,
-            sprint_phases    = _cfg("SPRINT_PHASES"),
-            sprint_goals     = _cfg("SPRINT_GOALS"),
-            threshold        = refill_threshold,
-        )
-        generate_dashboard()
 
 
 # ── GIT COMMIT IPC ───────────────────────────────────────────────────────────

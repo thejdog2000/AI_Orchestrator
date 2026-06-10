@@ -129,6 +129,12 @@ GameManager, EventBus, RTSCameraController, InputManager, Unit base class + Unit
 
 ---
 
+## Cowork / Sandbox Repo Access
+
+Symlinks exist at `~/projects/lang` and `~/projects/gamma` pointing to their repos, but the Cowork sandbox cannot follow symlinks that resolve outside the mounted folder. To read lang/gamma files from within a Cowork session, select the target folder directly via the Cowork folder picker (`~/Documents/Claude/Projects/Language Learning App` or `~/Documents/Claude/Projects/gamma-tool`). The orchestrator itself running natively on macOS can follow the symlinks fine.
+
+---
+
 ## Sprint Phases (update in `config.py` as sprints progress)
 
 | Project | Current Phase | Goal |

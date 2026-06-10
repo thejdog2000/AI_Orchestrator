@@ -555,5 +555,3 @@ def get_gap_fill_tasks() -> list[dict]:
             "depends_on":       [],
         },
     ]
-
-    return total

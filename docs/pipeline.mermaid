@@ -1,0 +1,37 @@
+flowchart TD
+    Jacob["👤 Jacob\n~10 min/day review"]
+    Discord["💬 #orchestrator-chat\nApprove · Reject · Status · Pause"]
+    Intent["🧠 Intent Parser\nOllama qwen3:14b — NL → action"]
+    Spend["💸 Spend Tracker\nChecks monthly cap · halts if over"]
+    Queue["📋 Task Queue\nSQLite · priority · dedup · deps"]
+    Council["🤖 Council\n3 personas · MiniMax M3 · ~8 tasks/run"]
+    Executor["⚙️ Executor\n① Ollama writes prompt\n② MiniMax generates code\n③ Files written to repo"]
+    Gate["🔍 Quality Gate\nOllama scores diff 0–10\nPass ≥ 7"]
+    Commit["✅ Auto-Commit\ngit commit · CONTEXT.md updated"]
+    Live["📡 #orchestrator-live\nTask committed · cost · hash"]
+    Blocked["🔴 #orchestrator-blocked\nRich embed · Jacob approves/rejects"]
+
+    Jacob -->|"Discord or o CLI"| Discord
+    Discord --> Intent
+    Intent -->|"structured action"| Queue
+    Spend -->|"if under cap"| Queue
+    Queue -->|"next task"| Executor
+    Queue -->|"if < 10 tasks"| Council
+    Council -->|"new tasks"| Queue
+    Executor --> Gate
+    Gate -->|"pass ≥ 7"| Commit
+    Gate -->|"fail or approval_required"| Blocked
+    Commit --> Live
+    Blocked -->|"Jacob reviews"| Jacob
+
+    style Jacob fill:#1a1d27,stroke:#3b82f6,color:#e2e8f0
+    style Discord fill:#1a1d27,stroke:#5865f2,color:#e2e8f0
+    style Intent fill:#1a1d27,stroke:#8b5cf6,color:#e2e8f0
+    style Spend fill:#1a1d27,stroke:#f59e0b,color:#e2e8f0
+    style Queue fill:#1a1d27,stroke:#10b981,color:#e2e8f0
+    style Council fill:#1a1d27,stroke:#8b5cf6,color:#e2e8f0
+    style Executor fill:#1a1d27,stroke:#3b82f6,color:#e2e8f0
+    style Gate fill:#1a1d27,stroke:#f59e0b,color:#e2e8f0
+    style Commit fill:#1a1d27,stroke:#10b981,color:#e2e8f0
+    style Live fill:#1a1d27,stroke:#5865f2,color:#e2e8f0
+    style Blocked fill:#1a1d27,stroke:#ef4444,color:#e2e8f0

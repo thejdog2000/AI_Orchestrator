@@ -162,6 +162,18 @@ def task_failed(task: dict, error: str, attempts: int) -> bool:
     return post("live", msg)
 
 
+def pbi_playtest_ready(pbi: dict, notes: str) -> bool:
+    """Post to #live when a PBI is complete and ready for human playtesting."""
+    title   = pbi.get("title", "?")[:80]
+    project = pbi.get("project", "?")
+    bullets = notes.strip()[:800]
+    msg = (
+        f"🎮  **[{project}]** PBI ready to playtest: **{title}**\n"
+        f"{bullets}"
+    )
+    return post("live", msg)
+
+
 def pbi_ready_for_review(task: dict, pbi: dict, pr_url: str = "") -> bool:
     """Post to #live and #blocked when all tasks in a PBI are complete."""
     branch  = f"pbi/{pbi['id']}"

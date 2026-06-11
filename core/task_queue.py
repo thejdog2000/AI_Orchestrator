@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS pbis (
     handoff_notes        TEXT DEFAULT '{}',  -- JSON {task_id: "150-word summary"} per completed task
     pr_url               TEXT DEFAULT '',    -- GitHub PR URL once created
     status               TEXT DEFAULT 'active',  -- active | complete | cancelled
+    playtest_notes       TEXT DEFAULT '',    -- AI-generated bullets for manual verification
+    playtest_status      TEXT DEFAULT 'none',  -- none | pending | verified | issues_found
     created_at           TEXT
 );
 
@@ -396,6 +398,36 @@ class TaskQueue:
         if new_files:
             log.info(f"PBI {pbi_id}: added {len(new_files)} new file(s) to affected_files: {new_files}")
 
+    def set_playtest_notes(self, pbi_id: str, notes: str) -> None:
+        """Write AI-generated playtest bullets and mark PBI as pending human verification."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE pbis SET playtest_notes=?, playtest_status='pending' WHERE id=?",
+                (notes, pbi_id),
+            )
+        log.info(f"PBI {pbi_id}: playtest notes set, status → pending")
+
+    def mark_playtest_done(self, pbi_id: str, status: str = "verified") -> None:
+        """Mark a PBI's playtest as verified or issues_found."""
+        if status not in ("verified", "issues_found"):
+            raise ValueError(f"Invalid playtest status: {status!r}")
+        with self._conn() as conn:
+            conn.execute("UPDATE pbis SET playtest_status=? WHERE id=?", (status, pbi_id))
+
+    def get_playtest_queue(self) -> list[dict]:
+        """Return all PBIs with playtest_status='pending', newest first."""
+        with self._conn() as conn:
+            rows = conn.execute("""
+                SELECT * FROM pbis WHERE playtest_status = 'pending'
+                ORDER BY created_at DESC
+            """).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_task_priority(self, task_id: str, priority: int) -> None:
+        """Set a task's priority (lower number = runs sooner)."""
+        with self._conn() as conn:
+            conn.execute("UPDATE tasks SET priority=? WHERE id=?", (priority, task_id))
+
     def tasks_for_pbi(self, pbi_id: str) -> list[dict]:
         with self._conn() as conn:
             rows = conn.execute(
@@ -435,21 +467,46 @@ class TaskQueue:
         }
 
     def _queued_rows(self, conn: sqlite3.Connection, projects: list) -> list:
-        """Fetch all queued, non-approval-required tasks for the given projects."""
+        """
+        Fetch queued, non-approval-required tasks ordered by PBI focus first.
+
+        pbi_group ordering:
+          0 — task belongs to an in-progress PBI (has ≥1 running/completed/
+              pending_review sibling) → finish what's started
+          1 — standalone task (no pbi_id)
+          2 — task belongs to a PBI not yet started
+
+        Within each group, order by priority ASC, review_priority DESC.
+        """
         placeholders = ",".join("?" * len(projects)) if projects else ""
-        where_proj   = f"AND project IN ({placeholders})" if projects else ""
+        where_proj   = f"AND t.project IN ({placeholders})" if projects else ""
         return conn.execute(f"""
-            SELECT * FROM tasks
-            WHERE status = 'queued'
-              AND approval_required = 0
+            SELECT t.*,
+              CASE
+                WHEN t.pbi_id IS NOT NULL AND EXISTS (
+                  SELECT 1 FROM tasks t2
+                  WHERE t2.pbi_id = t.pbi_id
+                    AND t2.status IN ('running','completed','pending_review')
+                ) THEN 0
+                WHEN t.pbi_id IS NULL THEN 1
+                ELSE 2
+              END AS pbi_group
+            FROM tasks t
+            WHERE t.status = 'queued'
+              AND t.approval_required = 0
               {where_proj}
-            ORDER BY priority ASC, review_priority DESC
+            ORDER BY pbi_group ASC, t.priority ASC, t.review_priority DESC
         """, projects).fetchall()
 
     def get_next(self, projects: list = None) -> "dict | None":
         """
         Return the next runnable task: queued, not approval_required, all
-        dependencies satisfied. Sorted by priority ASC, review_priority DESC.
+        dependencies satisfied.
+
+        Prefers tasks from in-progress PBIs (pbi_group 0) so each PBI is
+        worked to completion before starting a new one. Falls through to
+        standalone tasks (group 1) then unstarted PBIs (group 2) only when
+        no in-progress PBI has unblocked tasks remaining.
         """
         projects = projects or []
         with self._conn() as conn:

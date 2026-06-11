@@ -426,6 +426,33 @@ def generate_pbi_handoff(task: dict, diff_text: str, pbi: dict) -> str:
     return result.strip() if result and len(result) > 30 else ""
 
 
+def _generate_playtest_notes(pbi: dict, tasks: list) -> str:
+    """
+    Ollama generates 3-5 concrete, human-playable verification steps for a
+    completed PBI. Focuses only on things that can't be caught by unit tests —
+    feel, flow, visual correctness, game logic as a player would experience it.
+    Non-blocking — returns "" on failure.
+    """
+    task_summaries = "\n".join(
+        f"- {t['description']}" for t in tasks[:10]
+    )
+    prompt = (
+        f"A PBI (product backlog item) just completed. Write 3-5 concrete playtest steps "
+        f"a human should do to verify it works correctly.\n"
+        f"Rules:\n"
+        f"- Each step is one sentence, starts with an action verb (open, tap, confirm, check)\n"
+        f"- Describe exactly what to do and what to look for\n"
+        f"- Only things a human needs to verify manually — no code or unit test suggestions\n"
+        f"- Be specific to this feature, not generic\n"
+        f"- Output as a plain numbered list, no intro text\n\n"
+        f"PBI: {pbi['title']}\n"
+        f"Completed tasks:\n{task_summaries}\n\n"
+        f"Playtest steps:"
+    )
+    result = ollama_generate(prompt, max_tokens=300, model=_cfg("OLLAMA_MODEL_DIGEST"), temperature=0.3)
+    return result.strip() if result and len(result) > 20 else ""
+
+
 def _extract_new_files_from_diff(diff_text: str, existing_files: list) -> list:
     """
     Parse a git diff for files that were newly created (not just modified).
@@ -1346,7 +1373,7 @@ def run_task(task: dict, spend_tracker, task_queue):
                     if new_files:
                         _tq2.update_pbi_affected_files(pbi_id, new_files)
 
-                    # PBI complete? — create PR and notify Discord
+                    # PBI complete? — create PR, generate playtest notes, notify Discord
                     prog = _tq2.pbi_progress(pbi_id)
                     remaining = prog["queued"] + prog["running"]
                     if remaining == 0 and prog["total"] > 0:
@@ -1355,6 +1382,13 @@ def run_task(task: dict, spend_tracker, task_queue):
                         pr_url    = create_pbi_pr(_pbi, pbi_tasks, repo_path)
                         if pr_url:
                             _tq2.set_pbi_pr_url(pbi_id, pr_url)
+
+                        # Generate human playtest checklist via Ollama
+                        playtest_notes = _generate_playtest_notes(_pbi, pbi_tasks)
+                        if playtest_notes:
+                            _tq2.set_playtest_notes(pbi_id, playtest_notes)
+                            _notify().pbi_playtest_ready(_pbi, playtest_notes)
+
                         _notify().pbi_ready_for_review(task, _pbi, pr_url=pr_url)
             except Exception as _e:
                 log.warning(f"[{project}] PBI post-commit hooks failed ({_e}) — non-fatal")
